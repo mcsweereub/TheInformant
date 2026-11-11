@@ -14,6 +14,8 @@ personal research. A separate, future program will visualise/categorise the outp
 - `src/informant/companies_house.py`: API client and the mapping from raw JSON to the schema.
 - `src/informant/discovery.py`: find the website (user > Wikidata > domain guess + verification).
 - `src/informant/crawler.py`: polite crawler (robots.txt, delay, same host, key pages only).
+  Thin script-heavy pages are retried in a headless browser (`renderer.py`, Playwright).
+  Discovery probes never use the browser.
 - `src/informant/extract.py`: non-LLM extraction (contacts, socials, tech stack, ownership check).
 - `src/informant/llm.py`: LLM extraction with two backends sharing one prompt/schema: Claude
   (`beta.messages.parse`) and Ollama (`/api/chat` with a JSON-schema `format`). Fixed SECTORS list.
@@ -46,6 +48,6 @@ personal research. A separate, future program will visualise/categorise the outp
 1. ~~Companies House: identity, SIC, address, officers, PSCs, filings~~
 2. ~~Find the company website, crawl key pages~~
 3. ~~LLM extraction of page text into the schema~~
-4. Playwright fallback for JavaScript-rendered sites (e.g. monzo.com yields almost no text)
+4. ~~Playwright fallback for JavaScript-rendered sites~~
 5. Recent news (Google News RSS / GNews)
 6. Later: iXBRL financials, ATS job feeds (Greenhouse/Lever), SIC descriptions, batch mode, SQLite

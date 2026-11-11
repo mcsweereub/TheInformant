@@ -8,6 +8,7 @@ ready for a separate visualisation/categorisation program to consume.
 ```sh
 uv sync
 cp .env.example .env   # then paste your Companies House API key into .env
+uv run playwright install chromium   # optional (~150 MB): reads JavaScript-built websites
 ```
 
 Get a free key at https://developer.company-information.service.gov.uk/
@@ -51,6 +52,9 @@ Profiles are written to `output/<number>-<name>.json`.
 2. **Crawl politely.** Fetches the homepage plus up to 7 key pages (about,
    products, careers, contact, news, investors). It obeys robots.txt, waits 1s
    between requests, stays on the same site, and skips anything that blocks it.
+   If a page comes back nearly empty because JavaScript builds it (e.g. monzo.com),
+   it reloads that page in a headless Chromium browser, and loads the rest of that
+   site the same way. Control this with `--browser auto|always|never` (default auto).
 3. **Extract without an LLM.** Role email addresses (info@, sales@...),
    phone numbers, company social accounts and tech stack.
 4. **Extract with an LLM** (Claude or a local Ollama model). Summary, sectors from a

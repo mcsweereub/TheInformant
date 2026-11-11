@@ -136,6 +136,9 @@ def lookup(
     web: bool = typer.Option(True, "--web/--no-web", help="Discover and crawl the company website."),
     llm: bool = typer.Option(True, "--llm/--no-llm", help="Use an LLM to extract products, sectors etc."),
     max_pages: int = typer.Option(8, help="Maximum website pages to fetch."),
+    browser: str | None = typer.Option(
+        None, "--browser", help="Headless browser for JavaScript-built sites: auto, always or never "
+        "[default: INFORMANT_BROWSER or auto]."),
     json_mode: bool = JSON_OPT,
     progress: bool = typer.Option(False, "--progress", help="Write JSON progress events to stderr."),
 ) -> None:
@@ -144,7 +147,10 @@ def lookup(
     def body() -> None:
         if out_dir is not None and out_file is not None:
             raise ConfigError("Use --out or --out-file, not both.")
-        kwargs = dict(website=website, web=web, llm=llm, max_pages=max_pages, filings=filings)
+        if browser is not None and browser.lower() not in ("auto", "always", "never"):
+            raise ConfigError("--browser must be auto, always or never.")
+        kwargs = dict(website=website, web=web, llm=llm, max_pages=max_pages, filings=filings,
+                      browser=browser)
 
         if progress or json_mode:
             callback = _write_progress_line if progress else None

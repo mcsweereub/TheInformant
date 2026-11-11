@@ -144,9 +144,14 @@ LLM_OUTPUT = {
     "sectors": ["Engineering & Manufacturing", "Made Up Sector"],
     "tags": ["Widgets", "industrial", "widgets "],
     "target_markets": ["UK manufacturers"],
-    "products": [{"name": "Widget Pro", "description": "A strong widget.", "category": "widgets"}],
+    "products": [
+        {"name": "Widget Pro", "description": "A strong widget.", "category": "widgets",
+         "source_page": "https://acme.example/products/"},
+        {"name": "Widget Lite", "description": "A light widget.", "category": "widgets",
+         "source_page": "https://made-up.example/nowhere"},
+    ],
     "offices": [{"label": "Head office", "address": "1 High St", "locality": "London",
-                 "country": "United Kingdom"}],
+                 "country": "United Kingdom", "source_page": "https://acme.example/contact"}],
 }
 
 
@@ -236,6 +241,12 @@ def test_research_website_end_to_end(monkeypatch):
     assert profile.website.business_model == "B2B"
     assert profile.products[0].name == "Widget Pro"
     assert profile.products[0].sources[0].name == "llm_extraction"
+    # One source per item: the page the model named, if we really crawled it...
+    assert [x.url for x in profile.products[0].sources] == ["https://acme.example/products/"]
+    # ...otherwise the website itself, never an invented page.
+    assert [x.url for x in profile.products[1].sources] == ["https://acme.example/"]
+    office = next(l for l in profile.locations if l.kind == "office")
+    assert [x.url for x in office.sources] == ["https://acme.example/contact"]
     assert any(l.kind == "office" for l in profile.locations)
     assert "Engineering & Manufacturing" in profile.classification.sectors
     # Round trip through JSON still validates.
@@ -324,9 +335,79 @@ def test_copied_prompt_output_is_discarded():
     echoed = dict(LLM_OUTPUT,
                   summary="Write a summary of two or three plain sentences saying what the company does",
                   products=[{"name": "product name", "description": "one-sentence description",
-                             "category": "short category"}])
+                             "category": "short category", "source_page": "https://acme.example/"}])
     respx.post(OLLAMA_SHOW).respond(json={"capabilities": ["completion"]})
     respx.post(OLLAMA).respond(json={"message": {"content": json.dumps(echoed)}, "done_reason": "stop"})
     home = parse_page("https://acme.example/", "home", 200, HOME)
     r = extract_with_ollama("Acme", [home])
     assert r.data is None and "copied the prompt" in r.notes[-1]
+
+
+def test_repeated_lines_sent_once():
+    from informant.llm import build_page_text
+    menu = "Home\nAbout us\nOur menu\nCareers\n"
+    footer = "\n(c) Acme Ltd. Registered in England no. 01234567\nCookie settings"
+    pages = [
+        parse_page("https://acme.example/", "home", 200,
+                   f"<html><body><pre>{menu}Welcome to Acme widgets.{footer}</pre></body></html>"),
+        parse_page("https://acme.example/investors", "investors", 200,
+                   f"<html><body><pre>{menu}Annual results 2026: revenue up 12%.{footer}</pre></body></html>"),
+    ]
+    text, notes = build_page_text(pages)
+    assert text.count("Our menu") == 1 and text.count("Cookie settings") == 1
+    assert "Welcome to Acme widgets." in text
+    assert "Annual results 2026: revenue up 12%." in text  # each page's own content kept
+    assert "=== PAGE (investors)" in text
+
+
+def test_fair_shares():
+    from informant.llm import fair_shares
+    # Short pages take what they need; long ones split the rest equally.
+    assert fair_shares([1_000, 50_000, 50_000], 21_000, cap=12_000) == [1_000, 10_000, 10_000]
+    # Nothing exceeds the cap, even with spare budget.
+    assert fair_shares([30_000], 60_000, cap=12_000) == [12_000]
+    # Empty pages get nothing; total never exceeds the budget.
+    shares = fair_shares([17_000, 0, 34_000, 14_000, 7_000, 4_000], 28_000, cap=12_000)
+    assert shares[1] == 0 and sum(shares) <= 28_000 and all(s >= 4_000 for s in shares if s)
+
+
+def test_long_page_cannot_crowd_out_investors():
+    from informant.llm import build_page_text
+    legal = parse_page("https://bank.example/info", "products", 200,
+                       "<html><body><p>" + "Clause text. " * 20_000 + "</p></body></html>")
+    inv = parse_page("https://bank.example/investors", "investors", 200,
+                     "<html><body><p>Annual report: profit of 60 million pounds.</p></body></html>")
+    text, _ = build_page_text([legal, inv], total_limit=20_000)
+    assert "Annual report: profit of 60 million pounds." in text
+
+
+def test_choose_pages_skips_legal_and_promo_links():
+    html = """<html><body>
+      <a href="/service-information">Our services</a>
+      <a href="/terms-and-conditions">Products terms</a>
+      <a href="/business-banking">Business account: an account packed with tools for your company</a>
+      <a href="/investor-information">Investor information</a>
+      <a href="/privacy-policy">About your privacy</a>
+      <a href="/who-we-are">Who we are</a>
+    </body></html>"""
+    home = parse_page("https://bank.example/", "home", 200, html)
+    chosen = dict((kind, url) for url, kind in choose_pages(home, max_extra=7))
+    assert chosen == {"about": "https://bank.example/who-we-are",
+                      "investors": "https://bank.example/investor-information"}
+
+
+@respx.mock
+def test_about_fallback_when_not_linked():
+    respx.get("https://bank.example/robots.txt").respond(404)
+    respx.get("https://bank.example/").respond(html=NORMAL_HOME)
+    respx.get("https://bank.example/about").respond(404)
+    respx.get("https://bank.example/about-us").respond(
+        html="<html><head><title>About Bank</title></head><body><p>We are a bank.</p></body></html>")
+    with Crawler(delay=0) as c:
+        result = c.crawl("https://bank.example/")
+    about = [p for p in result.ok_pages if p.kind == "about"]
+    assert about and about[0].url.rstrip("/").endswith("/about-us")
+
+
+NORMAL_HOME = ("<html><head><title>Bank</title></head><body><p>"
+               + "Welcome to the bank. " * 50 + "</p></body></html>")
