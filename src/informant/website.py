@@ -5,7 +5,8 @@ from __future__ import annotations
 from .crawler import Crawler, CrawlResult
 from .discovery import discover_website
 from .extract import detect_tech, extract_contacts, extract_social_links, verify_ownership
-from .llm import ExtractionResult, extract_with_llm
+from .llm import ExtractionResult, current_model, extract_with_llm
+from .progress import ProgressFn, emit
 from .schema import CompanyProfile, Location, Product, Source, WebPage, Website
 
 _RANK = {"low": 0, "medium": 1, "high": 2}
@@ -31,6 +32,7 @@ def research_website(
     user_url: str | None = None,
     max_pages: int = 8,
     use_llm: bool = True,
+    progress: ProgressFn | None = None,
 ) -> CompanyProfile:
     """Fill the website-derived sections of `profile` in place and return it."""
     ident = profile.identity
@@ -38,6 +40,7 @@ def research_website(
         (l.postal_code for l in profile.locations if l.kind == "registered_office"), None
     )
 
+    emit(progress, "website_discovery", "started", "Finding the company website")
     found = discover_website(
         crawler,
         company_name=ident.name,
@@ -54,8 +57,14 @@ def research_website(
     )
     profile.website = site
     if not found.url:
+        emit(progress, "website_discovery", "failed", "Website not found")
+        for stage in ("crawl", "extract", "llm"):
+            emit(progress, stage, "skipped", "No website")
         return profile
+    emit(progress, "website_discovery", "done", found.url,
+         url=found.url, via=found.via, confidence=found.confidence)
 
+    emit(progress, "crawl", "started", f"Reading up to {max_pages} pages")
     result = crawler.crawl(found.url, max_pages=max_pages)
     site.notes.extend(result.notes)
     site.url = result.final_url or found.url
@@ -67,7 +76,12 @@ def research_website(
     ]
     if not pages:
         site.notes.append("no readable pages; nothing extracted")
+        emit(progress, "crawl", "failed", "No readable pages")
+        for stage in ("extract", "llm"):
+            emit(progress, stage, "skipped", "No readable pages")
         return profile
+    emit(progress, "crawl", "done", f"{len(pages)} pages read", pages=len(pages))
+    emit(progress, "extract", "started", "Contacts, social links and tech stack")
 
     web_source = Source(name="website", url=site.url)
     site.sources = [web_source]
@@ -90,11 +104,22 @@ def research_website(
     site.social_links = extract_social_links(pages)
     profile.tech_stack = detect_tech(result)
     ident.website = site.url
+    emit(progress, "extract", "done", None, tech=len(profile.tech_stack),
+         social=len(site.social_links))
 
     if use_llm:
+        backend, model = current_model()
+        emit(progress, "llm", "started", f"Extracting with {backend}/{model}",
+             backend=backend, model=model)
         llm = extract_with_llm(ident.name, pages)
         site.notes.extend(llm.notes)
         _merge_llm(profile, llm, [p.url for p in pages])
+        if llm.data is None:
+            emit(progress, "llm", "failed", llm.notes[-1] if llm.notes else "No result")
+        else:
+            emit(progress, "llm", "done", None, model=llm.model, products=len(profile.products))
+    else:
+        emit(progress, "llm", "skipped", "LLM disabled")
     return profile
 
 

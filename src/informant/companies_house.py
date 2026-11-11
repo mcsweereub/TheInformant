@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 
+from .errors import ConfigError, NotFoundError, UpstreamError
 from .schema import (
     Classification,
     Compliance,
@@ -45,8 +46,20 @@ def normalise_company_number(value: str) -> str | None:
     return v if COMPANY_NUMBER_RE.match(v) else None
 
 
-class CompaniesHouseError(RuntimeError):
-    pass
+class CompaniesHouseError(UpstreamError):
+    """Companies House request failed (network, server error, rate limit)."""
+
+
+class CompaniesHouseAuthError(CompaniesHouseError, ConfigError):
+    """API key missing or rejected."""
+
+    code = ConfigError.code
+    exit_code = ConfigError.exit_code
+
+
+class CompanyNotFoundError(CompaniesHouseError, NotFoundError):
+    code = NotFoundError.code
+    exit_code = NotFoundError.exit_code
 
 
 @dataclass
@@ -68,7 +81,7 @@ class CompaniesHouseClient:
         max_retries: int = 3,
     ) -> None:
         if not api_key:
-            raise CompaniesHouseError(
+            raise CompaniesHouseAuthError(
                 "COMPANIES_HOUSE_API_KEY is not set. Get a free key at "
                 "https://developer.company-information.service.gov.uk/"
             )
@@ -93,7 +106,12 @@ class CompaniesHouseClient:
 
     def _get(self, path: str, *, allow_404: bool = False, **params: Any) -> dict | None:
         for attempt in range(self._max_retries + 1):
-            resp = self._http.get(path, params=params or None)
+            try:
+                resp = self._http.get(path, params=params or None)
+            except httpx.HTTPError as e:
+                raise CompaniesHouseError(
+                    f"Could not reach Companies House ({type(e).__name__})."
+                ) from e
             if resp.status_code == 429 and attempt < self._max_retries:
                 wait = float(resp.headers.get("Retry-After", 2 ** (attempt + 1)))
                 time.sleep(min(wait, 60))
@@ -101,7 +119,7 @@ class CompaniesHouseClient:
             if resp.status_code == 404 and allow_404:
                 return None
             if resp.status_code == 401:
-                raise CompaniesHouseError("Companies House rejected the API key (401).")
+                raise CompaniesHouseAuthError("Companies House rejected the API key (401).")
             if resp.is_error:
                 raise CompaniesHouseError(
                     f"GET {path} failed: {resp.status_code} {resp.text[:200]}"
@@ -147,7 +165,7 @@ class CompaniesHouseClient:
     def profile(self, number: str) -> dict:
         data = self._get(f"/company/{number}", allow_404=True)
         if data is None:
-            raise CompaniesHouseError(f"No company found with number {number}.")
+            raise CompanyNotFoundError(f"No company found with number {number}.")
         return data
 
     def officers(self, number: str, limit: int = 200) -> list[dict]:

@@ -18,7 +18,17 @@ personal research. A separate, future program will visualise/categorise the outp
 - `src/informant/llm.py`: LLM extraction with two backends sharing one prompt/schema: Claude
   (`beta.messages.parse`) and Ollama (`/api/chat` with a JSON-schema `format`). Fixed SECTORS list.
 - `src/informant/website.py`: website pipeline; merges results into CompanyProfile.
-- `src/informant/cli.py`: typer CLI.
+- `src/informant/pipeline.py`: `research_company()`: the whole lookup as one importable function,
+  with a progress callback (`progress.py`). The CLI and any GUI both call this.
+- `src/informant/storage.py`: atomic saves + per-folder `index.json`.
+- `src/informant/errors.py`: error classes with stable `code` + `exit_code` (0/1/2/3/4).
+- `src/informant/cli.py`: typer CLI. Every command supports `--json` (one JSON object on stdout,
+  no prompts). Human messages go to stderr. This machine contract is public: keep it stable.
+
+## Integration
+- TheInformant must stay a standalone console app. A GUI (planned: React + local Python API
+  + pywebview desktop window) will live in a separate project and use this one via the
+  `--json` CLI contract or by importing `informant.pipeline`. Don't put GUI code here.
 
 ## Ground rules
 - Company-focused. Store data about people **only** from official registries
