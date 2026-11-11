@@ -78,6 +78,66 @@ always present (empty when not yet populated), and every section carries
 | news             | news API / RSS         | planned |
 | hiring           | careers page / ATS     | planned |
 
+## Using TheInformant from other programs
+
+TheInformant is a standalone console program, and can also be driven by other
+programs such as a GUI, in one of two ways.
+
+### 1. Run it as a command (any language)
+
+Add `--json` to any command. Then:
+
+- **stdout** carries exactly one JSON object: `{"ok": true, ...}`, or
+  `{"ok": false, "error": {"code": "...", "message": "..."}}`.
+- It **never prompts** for input.
+- The **exit code** says what happened:
+
+  | Exit | `error.code` | Meaning |
+  |---|---|---|
+  | 0 | | success |
+  | 1 | `internal_error` | unexpected bug |
+  | 2 | `not_found` | no company matches |
+  | 3 | `config_error` | missing or invalid settings (API key, model, options) |
+  | 4 | `upstream_error` | Companies House or the network failed |
+
+```sh
+informant search "greggs" --json                 # {"results": [{company_number, title, status, ...}]}
+informant lookup 00502851 --json --progress      # result on stdout, progress lines on stderr
+informant lookup 00502851 --json --out-file D:/data/greggs.json
+informant list --json                            # every saved profile, from index.json
+informant model --json                           # model menu; `model qwen3:4b --json` sets it
+informant version --json                         # program + output schema version
+informant schema                                 # JSON Schema of the profile format
+informant --env-file C:/path/informant.env lookup ...   # use a different settings file
+```
+
+`lookup --json` returns `path`, `index`, `matched_by` (`number` or `search`),
+`alternatives` (other search matches), `warnings`, and the full `profile`.
+
+**Progress.** With `--progress`, each step writes one JSON line to stderr:
+`{"event": "progress", "stage": "crawl", "status": "done", "message": "5 pages read", "data": {...}, "ts": "..."}`.
+Stages, in order: `resolve`, `companies_house`, `website_discovery`, `crawl`,
+`extract`, `llm`, `save`. Status is `started`, `done`, `skipped` or `failed`.
+
+**Output folder.** Profiles go to `--out <folder>`, or `INFORMANT_OUTPUT_DIR`, or
+`./output`. Files are written atomically (to a temporary file, then renamed),
+so readers never see half-written files. Each folder has an `index.json` listing
+every profile (number, name, status, sectors, website, generated time, file name).
+If the index goes missing, it's rebuilt from the profile files.
+
+### 2. Import it (Python)
+
+```python
+from informant.pipeline import research_company
+from informant.storage import save_profile
+
+result = research_company("00502851", progress=lambda e: print(e.to_dict()))
+path, index = save_profile(result.profile, out_dir=Path("D:/data"))
+```
+
+Failures raise `informant.errors.InformantError` subclasses, which carry the
+same `code` and `exit_code` as above.
+
 ## Tests
 
 ```sh
