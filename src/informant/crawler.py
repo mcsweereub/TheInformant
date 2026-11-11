@@ -9,6 +9,7 @@ careers, contact, news). Deliberately conservative:
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -18,18 +19,33 @@ from urllib.robotparser import RobotFileParser
 import httpx
 from bs4 import BeautifulSoup
 
+from .renderer import BrowserUnavailable, PlaywrightRenderer, Renderer
+
 USER_AGENT = "Mozilla/5.0 (compatible; informant/0.1; personal company research)"
 MAX_BYTES = 3_000_000
 
-# Page kinds we look for, in priority order, with URL/link-text keywords.
+# Page kinds we look for, in priority order (earlier kinds win when max_pages is
+# small), with keywords matched against URL path segments and short link labels.
 PAGE_KINDS: dict[str, tuple[str, ...]] = {
-    "about": ("about", "who-we-are", "our-story", "company", "our-company"),
+    "about": ("about", "who-we-are", "our-story", "our-company", "company"),
     "products": ("product", "service", "solution", "what-we-do", "platform", "shop", "menu"),
+    "investors": ("investor", "annual-report", "results"),
     "careers": ("career", "jobs", "join-us", "work-with-us", "vacancies", "recruit"),
     "contact": ("contact", "find-us", "locations", "offices", "stores"),
     "news": ("news", "press", "media", "blog", "insights"),
-    "investors": ("investor", "results", "annual-report"),
 }
+
+# Legal and regulatory pages: long boilerplate that crowds out useful text.
+# Judged by URL and link label, which is far more reliable than judging the prose.
+LEGAL_RE = re.compile(
+    r"terms|conditions|privacy|cookie|legal|polic(?:y|ies)|disclaimer|gdpr|accessib|"
+    r"slavery|complaint|sitemap|regulatory|important-information|service-information|"
+    r"service-quality|information-about|whistleblow|tax-strategy|gender-pay",
+    re.I,
+)
+# Pages tried directly when the homepage doesn't link to one of that kind.
+FALLBACK_PATHS: dict[str, tuple[str, ...]] = {"about": ("/about", "/about-us")}
+_NOT_FOUND_RE = re.compile(r"(404|page not found|can.t find (that|this) page)", re.I)
 
 _SKIP_EXT = re.compile(r"\.(pdf|jpe?g|png|gif|svg|webp|zip|docx?|xlsx?|pptx?|mp4|mp3)$", re.I)
 
@@ -44,6 +60,7 @@ class Page:
     text: str = ""
     links: list[tuple[str, str]] = field(default_factory=list)  # (absolute url, link text)
     headers: dict[str, str] = field(default_factory=dict)
+    rendered: bool = False  # loaded through the headless browser
 
 
 @dataclass
@@ -57,6 +74,11 @@ class CrawlResult:
     @property
     def ok_pages(self) -> list[Page]:
         return [p for p in self.pages if p.status_code == 200 and p.text]
+
+
+def looks_js_rendered(page: Page) -> bool:
+    """Little readable text but lots of scripts: content is probably built by JavaScript."""
+    return len(page.text) < 800 and page.html.count("<script") > 3
 
 
 def normalise_url(url: str) -> str:
@@ -91,37 +113,65 @@ def _same_site(a: str, b: str) -> bool:
     return strip(ha) == strip(hb)
 
 
+def _match_score(path: str, text: str, keywords: tuple[str, ...]) -> int | None:
+    """Lower is better; None means the link isn't this kind of page."""
+    for k in keywords:
+        # A path segment that is, or starts with, the keyword: /about, /about-us, /investors
+        if re.search(rf"/{re.escape(k)}[a-z]*(?:[-_/.]|$)", path):
+            return 0
+    label = text.lower()
+    if 0 < len(label.split()) <= 4:  # short nav labels only, not promotional blurbs
+        for k in keywords:
+            if re.search(rf"{re.escape(k.replace('-', ' '))}", label):
+                return 100
+    return None
+
+
 def choose_pages(home: Page, max_extra: int) -> list[tuple[str, str]]:
     """Pick the best link for each page kind from the homepage's links."""
     chosen: list[tuple[str, str]] = []
     seen = {home.url.rstrip("/")}
     for kind, keywords in PAGE_KINDS.items():
+        if len(chosen) >= max_extra:
+            break
         best: tuple[int, str] | None = None
         for href, text in home.links:
             if not href.startswith("http") or not _same_site(href, home.url):
                 continue
-            path = urlparse(href).path.lower()
+            path = urlparse(href).path.lower() or "/"
             if _SKIP_EXT.search(path) or href.rstrip("/") in seen:
                 continue
-            haystack = f"{path} {text.lower()}"
-            if not any(k in haystack for k in keywords):
+            if LEGAL_RE.search(path) or LEGAL_RE.search(text):
                 continue
-            # Prefer short, shallow paths (".../about" over ".../about/team/jane").
-            score = path.count("/") * 10 + len(path)
+            match = _match_score(path, text, keywords)
+            if match is None:
+                continue
+            # Then prefer short, shallow paths (".../about" over ".../about/team/jane").
+            score = match + path.count("/") * 10 + len(path)
             if best is None or score < best[0]:
                 best = (score, href)
         if best:
             chosen.append((best[1], kind))
             seen.add(best[1].rstrip("/"))
-        if len(chosen) >= max_extra:
-            break
     return chosen
+
+
+BrowserMode = str  # "auto" (only when needed), "always", or "never"
 
 
 class Crawler:
     def __init__(self, *, delay: float = 1.0, timeout: float = 15.0,
-                 client: httpx.Client | None = None) -> None:
+                 client: httpx.Client | None = None,
+                 browser: BrowserMode | None = None,
+                 renderer: Renderer | None = None) -> None:
         self.delay = delay
+        mode = (browser or os.environ.get("INFORMANT_BROWSER") or "auto").lower()
+        if mode not in ("auto", "always", "never"):
+            raise ValueError(f"browser mode must be auto, always or never, not {mode!r}")
+        self.browser_mode = mode
+        self._renderer = renderer
+        self._renderer_broken = False  # set once the browser turns out to be unavailable
+        self._js_site = False  # set once a site's homepage needed the browser
         self._http = client or httpx.Client(
             timeout=timeout,
             follow_redirects=True,
@@ -132,6 +182,8 @@ class Crawler:
 
     def close(self) -> None:
         self._http.close()
+        if self._renderer is not None:
+            self._renderer.close()
 
     def __enter__(self) -> Crawler:
         return self
@@ -176,10 +228,53 @@ class Crawler:
 
     # --- fetching ---------------------------------------------------------
 
-    def fetch(self, url: str, kind: str, notes: list[str]) -> Page | None:
+    def _render(self, url: str, kind: str, notes: list[str]) -> Page | None:
+        """Load a page in the headless browser. None if unavailable or it failed."""
+        if self.browser_mode == "never" or self._renderer_broken:
+            return None
+        if self._renderer is None:
+            self._renderer = PlaywrightRenderer(USER_AGENT)
+        self._wait(self._crawl_delay(url))
+        try:
+            final_url, status, html = self._renderer.render(url)
+        except BrowserUnavailable as e:
+            self._renderer_broken = True
+            notes.append(f"headless browser unavailable: {e}")
+            return None
+        except Exception as e:  # timeouts, crashes, navigation errors
+            notes.append(f"headless browser failed on {url}: {type(e).__name__}")
+            return None
+        if status != 200 or not html:
+            return Page(url=final_url, kind=kind, status_code=status)
+        page = parse_page(final_url, kind, status, html[:MAX_BYTES])
+        page.rendered = True
+        return page
+
+    def fetch(self, url: str, kind: str, notes: list[str], *, allow_render: bool = True) -> Page | None:
         if not self.allowed(url):
             notes.append(f"robots.txt disallows {url}; skipped")
             return None
+
+        # Known JavaScript site (or --browser always): go straight to the browser.
+        if allow_render and (self.browser_mode == "always" or self._js_site):
+            page = self._render(url, kind, notes)
+            if page is not None and page.status_code == 200 and page.text:
+                return page
+
+        page = self._fetch_http(url, kind, notes)
+
+        # Thin, script-heavy page: try again in the browser, keep it if it shows more.
+        if (allow_render and self.browser_mode == "auto" and page is not None
+                and page.status_code == 200 and looks_js_rendered(page)):
+            rendered = self._render(url, kind, notes)
+            if rendered is not None and len(rendered.text) > len(page.text):
+                rendered.headers = page.headers
+                if kind == "home":
+                    self._js_site = True
+                return rendered
+        return page
+
+    def _fetch_http(self, url: str, kind: str, notes: list[str]) -> Page | None:
         self._wait(self._crawl_delay(url))
         try:
             resp = self._http.get(url)
@@ -211,19 +306,39 @@ class Crawler:
         result.final_url = home.url
         result.headers = home.headers
         result.pages.append(home)
-        if len(home.text) < 800 and home.html.count("<script") > 3:
+        if home.rendered:
+            result.notes.append(
+                "JavaScript-built site: pages were loaded with a headless browser")
+        elif looks_js_rendered(home):
+            why = ("browser rendering is off (--browser never)" if self.browser_mode == "never"
+                   else "the headless browser couldn't help")
             result.notes.append(
                 "homepage has very little text and lots of scripts: probably "
-                "JavaScript-rendered, so content may be missing (no headless browser yet)"
-            )
+                f"JavaScript-rendered, so content may be missing ({why})")
 
-        for url, kind in choose_pages(home, max_extra=max_pages - 1):
+        chosen = choose_pages(home, max_extra=max_pages - 1)
+        for url, kind in chosen:
             page = self.fetch(url, kind, result.notes)
             if page:
                 result.pages.append(page)
+
+        # Kinds the homepage didn't link to: try the usual addresses directly.
+        found_kinds = {kind for _, kind in chosen}
+        for kind, paths in FALLBACK_PATHS.items():
+            if kind in found_kinds or len(result.pages) >= max_pages:
+                continue
+            for path in paths:
+                url = urljoin(home.url, path)
+                if url.rstrip("/") in {p.url.rstrip("/") for p in result.pages}:
+                    continue
+                page = self.fetch(url, kind, [])
+                if (page and page.status_code == 200 and page.text
+                        and not _NOT_FOUND_RE.search(page.title or "")):
+                    result.pages.append(page)
+                    break
         return result
 
     def probe(self, url: str) -> Page | None:
         """Fetch a single page quietly (used for website discovery)."""
         notes: list[str] = []
-        return self.fetch(normalise_url(url), "home", notes)
+        return self.fetch(normalise_url(url), "home", notes, allow_render=False)

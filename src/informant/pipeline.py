@@ -59,11 +59,16 @@ def research_company(
     llm: bool = True,
     max_pages: int = 8,
     filings: int = 25,
+    browser: str | None = None,
     progress: ProgressFn | None = None,
     ch_client: CompaniesHouseClient | None = None,
     crawler: Crawler | None = None,
 ) -> LookupResult:
-    """Build a CompanyProfile for a company name or number (does not save it)."""
+    """Build a CompanyProfile for a company name or number (does not save it).
+
+    browser: "auto" (headless browser only for JavaScript-built pages), "always" or
+    "never"; defaults to INFORMANT_BROWSER or "auto".
+    """
     own_ch = ch_client is None
     ch = ch_client or CompaniesHouseClient(os.environ.get("COMPANIES_HOUSE_API_KEY", ""))
     try:
@@ -87,7 +92,7 @@ def research_company(
 
     if web:
         own_crawler = crawler is None
-        crawler = crawler or Crawler()
+        crawler = crawler or Crawler(browser=browser)
         try:
             research_website(profile, crawler=crawler, user_url=website,
                              max_pages=max_pages, use_llm=llm, progress=progress)

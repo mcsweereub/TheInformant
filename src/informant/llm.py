@@ -29,6 +29,7 @@ DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_OLLAMA_NUM_CTX = 16384  # tokens; Ollama's own default is too small for web pages
 PAGE_CHAR_LIMIT = 12_000
 TOTAL_CHAR_LIMIT = 60_000
+OLLAMA_TIMEOUT_S = 1200.0  # 20 min: local models on a CPU are slow with long input
 OLLAMA_TOTAL_CHAR_LIMIT = 28_000  # ~7k tokens, leaves room in the context for prompt + output
 
 # A fixed vocabulary keeps categorisation consistent across companies.
@@ -57,6 +58,7 @@ Give the business model as exactly one of: B2B, B2C, B2B2C, marketplace, public 
 List the target markets: the kinds of customers or the regions the company sells to.
 List up to 15 of the main products, services or product lines, each with a one-sentence description and a short category.
 List up to 15 physical sites that the pages name, such as offices, factories or flagship locations. For a chain with hundreds of shops, give only the headquarters and mention the shop network in the summary.
+For each product and each site, set source_page to the web address shown on the PAGE line of the page where you found it.
 
 Every value you write must describe this particular company and come from its pages. Never copy wording from these instructions into your answer."""
 
@@ -65,6 +67,7 @@ class ExtractedProduct(BaseModel):
     name: str
     description: str
     category: str
+    source_page: str  # URL of the page it came from (checked against the crawled pages)
 
 
 class ExtractedOffice(BaseModel):
@@ -72,6 +75,7 @@ class ExtractedOffice(BaseModel):
     address: str
     locality: str
     country: str
+    source_page: str
 
 
 class WebsiteExtraction(BaseModel):
@@ -91,24 +95,57 @@ class ExtractionResult:
     notes: list[str] = field(default_factory=list)
 
 
+def remove_repeated_lines(pages: list[Page]) -> list[str]:
+    """Each page's text with any line already seen (on this or an earlier page)
+    removed. Menus, cookie banners and footers repeat on every page; the model
+    only needs them once. Pages are in crawl order, so the homepage keeps its copy."""
+    seen: set[str] = set()
+    texts = []
+    for page in pages:
+        kept = []
+        for line in page.text.splitlines():
+            key = " ".join(line.lower().split())
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            kept.append(line)
+        texts.append("\n".join(kept))
+    return texts
+
+
+def fair_shares(lengths: list[int], budget: int, cap: int = PAGE_CHAR_LIMIT) -> list[int]:
+    """Split `budget` characters between pages so each gets an equal share, up to
+    `cap`; pages needing less than their share pass the spare on to the others.
+    This way a long page (e.g. legal text) can't crowd out later ones."""
+    shares = [0] * len(lengths)
+    remaining = budget
+    pending = [i for i, n in enumerate(lengths) if n > 0]
+    # Smallest pages first: they take what they need, the rest split what's left.
+    for pos, i in enumerate(sorted(pending, key=lambda i: lengths[i])):
+        fair = remaining // (len(pending) - pos)
+        shares[i] = min(lengths[i], cap, fair)
+        remaining -= shares[i]
+    return shares
+
+
 def build_page_text(pages: list[Page], total_limit: int = TOTAL_CHAR_LIMIT) -> tuple[str, list[str]]:
     notes: list[str] = []
+    texts = remove_repeated_lines(pages)
+    original = sum(len(p.text) for p in pages)
+    deduped = sum(len(t) for t in texts)
+    if original - deduped >= 500:
+        notes.append(f"removed {original - deduped:,} characters of text repeated across pages "
+                     f"(menus, footers); {deduped:,} left")
+
+    shares = fair_shares([len(t) if t.strip() else 0 for t in texts], total_limit)
     parts: list[str] = []
-    total = 0
-    for page in pages:
-        text = page.text
-        if len(text) > PAGE_CHAR_LIMIT:
-            notes.append(f"{page.url}: sent first {PAGE_CHAR_LIMIT:,} of {len(text):,} characters to the LLM")
-            text = text[:PAGE_CHAR_LIMIT]
-        if total + len(text) > total_limit:
-            room = total_limit - total
-            if room < 1_000:
-                notes.append(f"{page.url}: left out of LLM input (size limit reached)")
-                continue
-            notes.append(f"{page.url}: sent first {room:,} characters to the LLM (size limit reached)")
-            text = text[:room]
+    for page, text, share in zip(pages, texts, shares):
+        if share == 0:
+            continue  # nothing on this page that wasn't already sent
+        if len(text) > share:
+            notes.append(f"{page.url}: sent first {share:,} of {len(text):,} characters to the LLM")
+            text = text[:share]
         parts.append(f"=== PAGE ({page.kind}): {page.url}\nTitle: {page.title or ''}\n\n{text}")
-        total += len(text)
     return "\n\n".join(parts), notes
 
 
@@ -281,7 +318,7 @@ def extract_with_ollama(company_name: str, pages: list[Page],
 
     own_client = http is None
     # Local models on a CPU can take several minutes, so allow a long read timeout.
-    http = http or httpx.Client(timeout=httpx.Timeout(900.0, connect=5.0))
+    http = http or httpx.Client(timeout=httpx.Timeout(OLLAMA_TIMEOUT_S, connect=5.0))
     request = {
         "model": model,
         "stream": False,
@@ -304,7 +341,9 @@ def extract_with_ollama(company_name: str, pages: list[Page],
         return ExtractionResult(None, notes=notes + [
             f"could not reach Ollama at {host}; start the Ollama app, or use --no-llm"])
     except httpx.TimeoutException:
-        return ExtractionResult(None, notes=notes + [f"{label} timed out; try a smaller model"])
+        return ExtractionResult(None, notes=notes + [
+            f"{label} didn't finish within {OLLAMA_TIMEOUT_S / 60:.0f} minutes; "
+            "try a smaller model, or Claude"])
     finally:
         if own_client:
             http.close()

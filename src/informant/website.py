@@ -71,7 +71,7 @@ def research_website(
     pages = result.ok_pages
     site.pages = [
         WebPage(url=p.url, kind=p.kind, status_code=p.status_code, title=p.title,
-                text_chars=len(p.text))
+                text_chars=len(p.text), rendered=p.rendered)
         for p in result.pages
     ]
     if not pages:
@@ -80,7 +80,10 @@ def research_website(
         for stage in ("extract", "llm"):
             emit(progress, stage, "skipped", "No readable pages")
         return profile
-    emit(progress, "crawl", "done", f"{len(pages)} pages read", pages=len(pages))
+    rendered = sum(1 for p in pages if p.rendered)
+    emit(progress, "crawl", "done",
+         f"{len(pages)} pages read" + (f" ({rendered} with the headless browser)" if rendered else ""),
+         pages=len(pages), rendered=rendered)
     emit(progress, "extract", "started", "Contacts, social links and tech stack")
 
     web_source = Source(name="website", url=site.url)
@@ -123,11 +126,22 @@ def research_website(
     return profile
 
 
+def _source_for(claimed: str, page_urls: list[str], site_url: str | None) -> list[Source]:
+    """The single page an item came from. The model names it; we only accept a
+    page we actually crawled, otherwise we fall back to the website itself."""
+    def norm(u: str) -> str:
+        return u.strip().rstrip("/").lower()
+
+    by_norm = {norm(u): u for u in page_urls}
+    url = by_norm.get(norm(claimed)) if claimed else None
+    return [Source(name="llm_extraction", url=url or site_url)]
+
+
 def _merge_llm(profile: CompanyProfile, llm: ExtractionResult, page_urls: list[str]) -> None:
     if llm.data is None:
         return
     d = llm.data
-    src = [Source(name="llm_extraction", url=u) for u in page_urls]
+    site_url = profile.website.url
 
     profile.website.llm_model = llm.model
     profile.identity.description = d.summary
@@ -137,14 +151,16 @@ def _merge_llm(profile: CompanyProfile, llm: ExtractionResult, page_urls: list[s
     cls = profile.classification
     cls.sectors = list(dict.fromkeys(cls.sectors + d.sectors))
     cls.tags = sorted(set(cls.tags) | set(d.tags))
-    cls.sources.append(Source(name="llm_extraction", url=profile.website.url))
+    cls.sources.append(Source(name="llm_extraction", url=site_url))
 
     profile.products = [
-        Product(name=p.name, description=p.description, category=p.category, sources=src)
+        Product(name=p.name, description=p.description, category=p.category,
+                sources=_source_for(p.source_page, page_urls, site_url))
         for p in d.products
     ]
     for o in d.offices:
         profile.locations.append(
             Location(kind="office", address_lines=[o.label, o.address] if o.address else [o.label],
-                     locality=o.locality or None, country=o.country or None, sources=src)
+                     locality=o.locality or None, country=o.country or None,
+                     sources=_source_for(o.source_page, page_urls, site_url))
         )
