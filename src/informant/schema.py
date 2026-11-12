@@ -181,7 +181,7 @@ class Financials(Sourced):
 
 class WebPage(BaseModel):
     url: str
-    kind: str  # home, about, products, careers, contact, news, other
+    kind: str  # home, about, products, investors, customers, careers, contact, news, other
     status_code: int | None = None
     title: str | None = None
     text_chars: int = 0  # how much readable text the page had

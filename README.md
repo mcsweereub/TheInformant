@@ -49,8 +49,11 @@ Profiles are written to `output/<number>-<name>.json`.
    A guessed site is kept only if it shows the company number or registered
    postcode (UK companies must show their number on their website), or has the
    name in its page title.
-2. **Crawl politely.** Fetches the homepage plus up to 7 key pages (about,
-   products, careers, contact, news, investors). It obeys robots.txt, waits 1s
+2. **Crawl politely.** Fetches the homepage plus up to 7 key pages: about, products,
+   investors, customers (case studies), careers, contact and news. Pages are matched by
+   address first, then by short menu labels; legal pages (terms, privacy, cookies,
+   regulatory notices) are skipped. Spare slots go to the homepage's other menu links,
+   so a product page like `/eos/` is still read. It obeys robots.txt, waits 1s
    between requests, stays on the same site, and skips anything that blocks it.
    If a page comes back nearly empty because JavaScript builds it (e.g. monzo.com),
    it reloads that page in a headless Chromium browser, and loads the rest of that

@@ -411,3 +411,60 @@ def test_about_fallback_when_not_linked():
 
 NORMAL_HOME = ("<html><head><title>Bank</title></head><body><p>"
                + "Welcome to the bank. " * 50 + "</p></body></html>")
+
+
+PLANLOGIC_LIKE = """<html><head><title>Planlogic</title></head><body><nav>
+  <a href="http://www.planlogic.example">HOME</a>
+  <a href="https://planlogic.example/eos/">EOS</a>
+  <a href="https://planlogic.example/work-with-us/">WORK WITH US</a>
+  <a href="https://planlogic.example/case-studies/">CASE STUDIES</a>
+  <a href="https://planlogic.example/contact-us/">CONTACT US</a>
+  <a href="https://planlogic.example/EOS">LEARN MORE</a>
+  <a href="https://planlogic.example/contact-us/">About Planlogic</a>
+  <a href="https://planlogic.example/fr/">Francais</a>
+  <a href="https://planlogic.example/blog/2024/05/some-post/">A post</a>
+  <a href="https://planlogic.example/my-account/">Log in</a>
+  <a href="https://planlogic.example/cookie-policy/">Cookies</a>
+</nav><p>Leaders in ETRM innovation.</p></body></html>"""
+
+
+def test_short_link_labels_match():
+    """Regression: label matching was silently broken by a stray control character."""
+    home = parse_page("https://x.example/", "home", 200,
+                      '<html><body><a href="/page-17">Investors</a></body></html>')
+    assert choose_pages(home, 7) == [("https://x.example/page-17", "investors")]
+
+
+def test_customers_kind_and_label_cannot_overrule_path():
+    home = parse_page("https://planlogic.example/", "home", 200, PLANLOGIC_LIKE)
+    chosen = dict((kind, url) for url, kind in choose_pages(home, 7))
+    assert chosen["customers"] == "https://planlogic.example/case-studies/"
+    assert chosen["contact"] == "https://planlogic.example/contact-us/"
+    assert "about" not in chosen  # "About Planlogic" links to /contact-us: not an about page
+
+
+def test_menu_links_fill_spare_slots():
+    from informant.crawler import menu_links
+    home = parse_page("https://planlogic.example/", "home", 200, PLANLOGIC_LIKE)
+    taken = {"/work-with-us", "/case-studies", "/contact-us"}
+    # /eos/ and /EOS are one page; language copies, deep posts, login and legal are skipped.
+    assert menu_links(home, taken, 5) == ["https://planlogic.example/eos/"]
+
+
+@respx.mock
+def test_crawl_fills_slots_and_ignores_fake_404_about():
+    respx.get("https://planlogic.example/robots.txt").respond(404)
+    respx.get("https://planlogic.example/").respond(html=PLANLOGIC_LIKE)
+    for path in ("/eos/", "/work-with-us/", "/case-studies/", "/contact-us/",
+                 "/blog/2024/05/some-post/"):
+        respx.get(f"https://planlogic.example{path}").respond(html=PAGE.format(t=path))
+    # A site that answers 200 with a "Page not found" page must not count as an about page.
+    respx.get("https://planlogic.example/about").respond(
+        html="<html><head><title>Page not found</title></head><body><p>Sorry.</p></body></html>")
+    respx.get("https://planlogic.example/about-us").respond(404)
+    with Crawler(delay=0) as c:
+        result = c.crawl("https://planlogic.example/")
+    kinds = {p.kind: p.url for p in result.ok_pages}
+    assert "about" not in kinds
+    assert kinds["other"] == "https://planlogic.example/eos/"
+    assert kinds["customers"] == "https://planlogic.example/case-studies/"
