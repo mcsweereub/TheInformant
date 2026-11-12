@@ -14,6 +14,9 @@ personal research. A separate, future program will visualise/categorise the outp
 - `src/informant/companies_house.py`: API client and the mapping from raw JSON to the schema.
 - `src/informant/discovery.py`: find the website (user > Wikidata > domain guess + verification).
 - `src/informant/crawler.py`: polite crawler (robots.txt, delay, same host, key pages only).
+  Page choice: PAGE_KINDS matched on URL path, then short labels (a label can't overrule a
+  path naming another kind); LEGAL_RE pages skipped; /about fallback; spare slots filled
+  from homepage menu links (`menu_links`).
   Thin script-heavy pages are retried in a headless browser (`renderer.py`, Playwright).
   Discovery probes never use the browser.
 - `src/informant/extract.py`: non-LLM extraction (contacts, socials, tech stack, ownership check).
@@ -31,6 +34,11 @@ personal research. A separate, future program will visualise/categorise the outp
 - TheInformant must stay a standalone console app. A GUI (planned: React + local Python API
   + pywebview desktop window) will live in a separate project and use this one via the
   `--json` CLI contract or by importing `informant.pipeline`. Don't put GUI code here.
+
+## Gotchas
+- Don't write Python source through bash heredocs with `` or `
+` escapes: they have
+  turned into real control characters / line breaks here. Use the Edit tool.
 
 ## Ground rules
 - Company-focused. Store data about people **only** from official registries
