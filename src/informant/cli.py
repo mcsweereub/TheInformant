@@ -29,7 +29,7 @@ from .sources.companies_house import CompaniesHouseClient
 from .cache import cache_stats, clear_cache
 from .errors import ConfigError, InformantError
 from .llm import STRATEGIES, ModelOption, choose_backend, current_model, model_options
-from .pipeline import research_company
+from .pipeline import REGISTRY_DEPTHS, research_company
 from .progress import ProgressEvent, emit
 from .schema import SCHEMA_VERSION, CompanyProfile
 from .storage import default_output_dir, load_index, save_profile
@@ -148,6 +148,9 @@ def lookup(
         "cached LLM answers)."),
     cache: bool = typer.Option(
         True, "--cache/--no-cache", help="Use the local cache of pages and LLM answers."),
+    registry: str | None = typer.Option(
+        None, "--registry", help="full (also filed accounts, share capital, charges, ownership, "
+        "related companies) or basic [default: INFORMANT_REGISTRY or full]."),
     json_mode: bool = JSON_OPT,
     progress: bool = typer.Option(False, "--progress", help="Write JSON progress events to stderr."),
 ) -> None:
@@ -160,9 +163,11 @@ def lookup(
             raise ConfigError("--browser must be auto, always or never.")
         if llm_strategy is not None and llm_strategy.lower() not in STRATEGIES:
             raise ConfigError("--llm-strategy must be auto, single or staged.")
+        if registry is not None and registry.lower() not in REGISTRY_DEPTHS:
+            raise ConfigError("--registry must be full or basic.")
         kwargs = dict(website=website, web=web, llm=llm, max_pages=max_pages, filings=filings,
                       browser=browser, llm_strategy=llm_strategy, use_cache=cache,
-                      refresh=refresh)
+                      refresh=refresh, registry=registry)
 
         if progress or json_mode:
             callback = _write_progress_line if progress else None
@@ -206,6 +211,7 @@ def lookup(
                       f"({profile.identity.company_number})")
             for h in result.alternatives:
                 err.print(f"  [dim]also: {h.title} ({h.company_number}, {h.status})[/dim]")
+        _print_registry(profile)
         if web:
             _print_website(profile)
         active = sum(1 for o in profile.people.officers if o.active)
@@ -216,6 +222,53 @@ def lookup(
         )
 
     _run("lookup", json_mode, body)
+
+
+def _money(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    sign = "-" if value < 0 else ""
+    v = abs(value)
+    if v >= 1_000_000:
+        return f"{sign}£{v / 1_000_000:.2f}m"
+    if v >= 1_000:
+        return f"{sign}£{v / 1_000:.0f}k"
+    return f"{sign}£{v:.0f}"
+
+
+def _print_registry(profile: CompanyProfile) -> None:
+    fin, own = profile.financials, profile.ownership
+    if fin.periods:
+        table = Table("Year end", "Turnover", "Profit", "Net assets", "Cash", "Employees",
+                      title="Filed accounts")
+        for p in fin.periods[:4]:
+            table.add_row(str(p.period_end), _money(p.turnover), _money(p.profit_loss),
+                          _money(p.net_assets), _money(p.cash),
+                          str(p.employees) if p.employees is not None else "n/a")
+        out.print(table)
+    for note in fin.notes:
+        out.print(f"  [dim]accounts: {note}[/dim]")
+
+    if own.parents:
+        chain = " -> ".join(p.name + (" (top of chain)" if p.is_ultimate else "")
+                           for p in own.parents)
+        out.print(f"Owned by: {chain}")
+    if profile.charges.total:
+        out.print(f"Charges: {profile.charges.outstanding} outstanding of {profile.charges.total}")
+    allotments = sum(1 for e in profile.capital.events if e.kind == "allotment")
+    if profile.capital.events:
+        out.print(f"Share capital filings: {len(profile.capital.events)} "
+                  f"({allotments} allotment{'' if allotments == 1 else 's'})")
+    if profile.related_companies.companies:
+        names = ", ".join(c.name.title() for c in profile.related_companies.companies[:5])
+        more = len(profile.related_companies.companies) - 5
+        out.print(f"Related companies ({len(profile.related_companies.companies)}): {names}"
+                  + (f" and {more} more" if more > 0 else ""))
+
+    colours = {"high": "red", "warning": "yellow", "info": "cyan"}
+    for f in profile.risk.flags:
+        evidence = f" [dim]({f.evidence})[/dim]" if f.evidence else ""
+        out.print(f"  [{colours[f.severity]}]{f.severity:>7}[/{colours[f.severity]}]  {f.message}{evidence}")
 
 
 def _print_website(profile: CompanyProfile) -> None:
@@ -382,7 +435,8 @@ def cache_cmd(
             out.print(f"[green]Removed {removed} cached file(s).[/green]")
         state = "on" if stats["enabled"] else "off (INFORMANT_CACHE)"
         out.print(f"Cache: {stats['path']}  [{state}]")
-        for name, label in (("pages", "crawled pages"), ("llm", "LLM answers")):
+        for name, label in (("pages", "crawled pages"), ("llm", "LLM answers"),
+                            ("accounts", "accounts documents")):
             s = stats[name]
             out.print(f"  {label}: {s['entries']} ({s['bytes'] / 1_048_576:.1f} MB)")
 

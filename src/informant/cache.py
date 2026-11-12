@@ -8,6 +8,7 @@ better model or prompt without crawling again.
 Layout (INFORMANT_CACHE_DIR, default ./.informant_cache):
     pages/<hash>.json.gz   one crawled page: url, final_url, html, headers, fetched_at
     llm/<hash>.json        one model answer, keyed by model + prompts + schema
+    accounts/<hash>.json   figures parsed from one filed accounts document
 
 Pages expire after INFORMANT_CACHE_DAYS (default 7). LLM answers never expire:
 their key includes the model, the prompts and the exact text sent, so any change
@@ -33,6 +34,7 @@ from .storage import write_atomic
 DEFAULT_DIR = ".informant_cache"
 DEFAULT_MAX_AGE_DAYS = 7.0
 _OFF = {"0", "off", "false", "no"}
+CACHE_FOLDERS = ("pages", "llm", "accounts")
 
 
 def cache_enabled() -> bool:
@@ -118,21 +120,42 @@ def llm_key(model_id: str, system: str, user: str, schema: type[BaseModel]) -> s
     return _hash(model_id, system, user, json.dumps(schema.model_json_schema(), sort_keys=True))
 
 
-class LlmCache:
+class JsonCache:
+    """A folder of small JSON files that never expire: for results that are a pure
+    function of their key (an LLM answer for an exact request; figures parsed
+    from a filed document, which never changes)."""
+
+    name = "json"
+
     def __init__(self, root: Path | None = None) -> None:
-        self.dir = (root or cache_root()) / "llm"
+        self.dir = (root or cache_root()) / self.name
+
+    def _file(self, key: str) -> Path:
+        # Keys may be URLs or hashes; hash anything that isn't a safe file name.
+        safe = key if key.isalnum() and len(key) <= 64 else _hash(key)
+        return self.dir / f"{safe}.json"
 
     def get(self, key: str) -> dict[str, Any] | None:
         try:
-            return json.loads((self.dir / f"{key}.json").read_text(encoding="utf-8"))
+            return json.loads(self._file(key).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
 
     def put(self, key: str, payload: dict[str, Any]) -> None:
         try:
-            write_atomic(self.dir / f"{key}.json", json.dumps(payload, ensure_ascii=False))
+            write_atomic(self._file(key), json.dumps(payload, ensure_ascii=False))
         except OSError:
             pass
+
+
+class LlmCache(JsonCache):
+    name = "llm"
+
+
+class AccountsCache(JsonCache):
+    """Figures parsed from a filed accounts document, keyed by the document's URL."""
+
+    name = "accounts"
 
 
 # --- housekeeping ---------------------------------------------------------------
@@ -141,7 +164,7 @@ class LlmCache:
 def cache_stats(root: Path | None = None) -> dict[str, Any]:
     root = root or cache_root()
     stats: dict[str, Any] = {"path": str(root.resolve()), "enabled": cache_enabled()}
-    for name in ("pages", "llm"):
+    for name in CACHE_FOLDERS:
         files = [f for f in (root / name).glob("*") if f.is_file()] if (root / name).is_dir() else []
         stats[name] = {"entries": len(files), "bytes": sum(f.stat().st_size for f in files)}
     return stats
@@ -151,7 +174,7 @@ def clear_cache(root: Path | None = None, *, pages: bool = True, llm: bool = Tru
     """Delete cached entries; returns how many files were removed."""
     root = root or cache_root()
     removed = 0
-    for name, wanted in (("pages", pages), ("llm", llm)):
+    for name, wanted in (("pages", pages), ("llm", llm), ("accounts", pages)):
         folder = root / name
         if not wanted or not folder.is_dir():
             continue

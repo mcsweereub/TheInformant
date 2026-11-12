@@ -42,6 +42,33 @@ Each profile records which model filled its LLM fields in `website.llm_model`.
 
 Profiles are written to `output/<number>-<name>.json`.
 
+## What comes from Companies House
+
+All of this is exact registry data: no LLM, no scraping, about 4 seconds per company.
+
+- **Core**: name, status, SIC codes, registered office, officers, persons with
+  significant control, recent filings, whether accounts are overdue.
+- **Filed accounts** (`financials`): turnover, profit, net assets, cash and employees
+  for the last 3-4 years, read from the figures tagged in the filed accounts (iXBRL).
+  Small companies often file no profit and loss account, so turnover may be absent.
+  Larger companies and groups usually file a PDF only: then the profile says so
+  rather than guessing.
+- **Share capital** (`capital`): allotments, buybacks and cancellations. An allotment
+  means new shares were issued, usually a funding round or a share scheme.
+- **Charges** (`charges`): mortgages and other security, with the lenders' names and
+  whether each is still outstanding.
+- **Ownership** (`ownership`): corporate owners traced upward to the top of the chain,
+  and the people registered as controlling it.
+- **Related companies** (`related_companies`): other companies that share current
+  officers (sister companies, holding companies, earlier ventures).
+- **Risk flags** (`risk`): rules over the facts above, each with its evidence.
+  `high` = formally wrong (overdue accounts, insolvency, strike-off notice);
+  `warning` = a pattern worth a closer look (several directors leaving, late accounts,
+  shrinking balance sheet); `info` = worth knowing (new shares issued, headcount change).
+  A flag is a prompt to look closer, not a verdict.
+
+`--registry basic` keeps just the core (and the flags that need only the core).
+
 ## How the website stage works
 
 1. **Find the site.** Uses `--website` if given. Otherwise it tries Wikidata (only
@@ -108,7 +135,12 @@ always present (empty when not yet populated), and every section carries
 | locations        | Companies House        | done    |
 | people           | Companies House only   | done    |
 | filings          | Companies House        | done    |
-| financials       | iXBRL accounts         | planned |
+| financials       | filed accounts (iXBRL) | done    |
+| capital          | Companies House        | done    |
+| charges          | Companies House        | done    |
+| ownership        | Companies House (PSC)  | done    |
+| related_companies| Companies House        | done    |
+| risk             | computed from the above| done    |
 | website          | company website        | done    |
 | products         | website + LLM          | done    |
 | tech_stack       | website                | done    |
@@ -153,8 +185,10 @@ informant --env-file C:/path/informant.env lookup ...   # use a different settin
 
 **Progress.** With `--progress`, each step writes one JSON line to stderr:
 `{"event": "progress", "stage": "crawl", "status": "done", "message": "5 pages read", "data": {...}, "ts": "..."}`.
-Stages, in order: `resolve`, `companies_house`, `website_discovery`, `crawl`,
-`extract`, `llm`, `save`. Status is `started`, `done`, `skipped` or `failed`.
+Stages, in order: `resolve`, `companies_house`, `registry_details`,
+`website_discovery`, `crawl`, `extract`, `llm`, `save`. Status is `started`, `done`,
+`skipped` or `failed`. `registry_details` also sends `progress` events naming each
+step ("Reading filed accounts", "Tracing ownership"...).
 During staged extraction, the `llm` stage also sends `progress` events with
 `data.part` and `data.parts` ("Reading part 2 of 5", then "Combining notes").
 

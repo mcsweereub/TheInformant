@@ -13,18 +13,23 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
-from .cache import LlmCache, PageCache, cache_enabled
+from .cache import AccountsCache, LlmCache, PageCache, cache_enabled
+from .errors import ConfigError, NotFoundError
 from .sources.companies_house import (
     CompaniesHouseClient,
     SearchHit,
     fetch_company,
     normalise_company_number,
 )
+from .sources.companies_house.details import STAGE as REGISTRY_STAGE
+from .sources.companies_house.details import add_registry_details, add_risk_flags
 from .sources.website.fetch import Crawler
-from .errors import NotFoundError
 from .progress import ProgressFn, emit
 from .schema import CompanyProfile
 from .sources.website.research import research_website
+
+
+REGISTRY_DEPTHS = ("full", "basic")
 
 
 @dataclass
@@ -64,12 +69,15 @@ def research_company(
     llm_strategy: str | None = None,
     use_cache: bool = True,
     refresh: bool = False,
+    registry: str | None = None,
     progress: ProgressFn | None = None,
     ch_client: CompaniesHouseClient | None = None,
     crawler: Crawler | None = None,
 ) -> LookupResult:
     """Build a CompanyProfile for a company name or number (does not save it).
 
+    registry: "full" (also read filed accounts, share capital, charges, ownership
+    and related companies) or "basic"; defaults to INFORMANT_REGISTRY or "full".
     browser: "auto" (headless browser only for JavaScript-built pages), "always" or
     "never"; defaults to INFORMANT_BROWSER or "auto".
     llm_strategy: "auto", "single" (one LLM call) or "staged" (notes per part, then
@@ -77,6 +85,11 @@ def research_company(
     use_cache: reuse locally cached pages and LLM answers (see cache.py).
     refresh: re-download pages even if cached (unchanged pages still reuse LLM answers).
     """
+    depth = (registry or os.environ.get("INFORMANT_REGISTRY") or "full").strip().lower()
+    if depth not in REGISTRY_DEPTHS:
+        raise ConfigError(f"registry depth must be full or basic, not {depth!r}.")
+    caching = use_cache and cache_enabled()
+
     own_ch = ch_client is None
     ch = ch_client or CompaniesHouseClient(os.environ.get("COMPANIES_HOUSE_API_KEY", ""))
     try:
@@ -85,22 +98,27 @@ def research_company(
         ch_data = fetch_company(ch, number, filings_limit=filings)
         emit(progress, "companies_house", "done", ch_data.identity.name,
              officers=len(ch_data.people.officers), filings=len(ch_data.filings.recent))
+
+        profile = CompanyProfile(
+            query=query,
+            identity=ch_data.identity,
+            classification=ch_data.classification,
+            locations=ch_data.locations,
+            people=ch_data.people,
+            filings=ch_data.filings,
+        )
+        if depth == "full" and ch_data.raw is not None:
+            add_registry_details(ch, profile, ch_data.raw, progress=progress,
+                                 accounts_cache=AccountsCache() if caching else None)
+        else:
+            emit(progress, REGISTRY_STAGE, "skipped", "Basic registry data only")
+        add_risk_flags(profile, ch_data.raw)
     finally:
         if own_ch:
             ch.close()
 
-    profile = CompanyProfile(
-        query=query,
-        identity=ch_data.identity,
-        classification=ch_data.classification,
-        locations=ch_data.locations,
-        people=ch_data.people,
-        filings=ch_data.filings,
-    )
-
     if web:
         own_crawler = crawler is None
-        caching = use_cache and cache_enabled()
         crawler = crawler or Crawler(
             browser=browser, cache=PageCache(refresh=refresh) if caching else None)
         try:

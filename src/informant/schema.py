@@ -18,7 +18,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-SCHEMA_VERSION = "0.4.0"
+SCHEMA_VERSION = "0.5.0"
 
 SourceName = Literal[
     "companies_house",
@@ -161,19 +161,146 @@ class Filings(Sourced):
 
 
 class FinancialPeriod(BaseModel):
+    """One accounting period, read from the figures tagged in filed accounts (iXBRL).
+
+    Small companies often don't file a profit and loss account, so turnover and
+    profit are frequently absent while the balance-sheet figures are present.
+    """
+
     period_end: date
+    period_start: date | None = None
     currency: str = "GBP"
+    # profit and loss
     turnover: float | None = None
-    profit_loss: float | None = None
-    net_assets: float | None = None
+    gross_profit: float | None = None
+    operating_profit: float | None = None
+    profit_before_tax: float | None = None
+    profit_loss: float | None = None  # profit (or loss) for the period, after tax
+    # balance sheet
+    fixed_assets: float | None = None
+    current_assets: float | None = None
+    debtors: float | None = None
     cash: float | None = None
-    employees: int | None = None
+    net_current_assets: float | None = None
+    total_assets_less_current_liabilities: float | None = None
+    net_assets: float | None = None
+    equity: float | None = None
+    employees: int | None = None  # average number during the period
+    filed_on: date | None = None  # when the accounts these figures came from were filed
+    source_url: str | None = None
 
 
 class Financials(Sourced):
-    """Populated later from iXBRL accounts filings."""
+    """Figures from filed accounts, newest period first."""
 
     periods: list[FinancialPeriod] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)  # e.g. accounts filed as PDF only
+
+
+# --- share capital, charges, ownership, related companies, risk ----------------
+
+
+class CapitalEvent(BaseModel):
+    """A share capital filing. An allotment (SH01) means new shares were issued,
+    which usually signals a funding round or share scheme."""
+
+    kind: str  # allotment, cancellation, buyback, reduction, subdivision, other
+    form: str | None = None  # SH01, SH06, ...
+    event_date: date | None = None  # when it happened
+    filed_on: date | None = None
+    description: str | None = None
+    share_capital: float | None = None  # total nominal share capital afterwards
+    currency: str | None = None
+    document_url: str | None = None
+
+
+class Capital(Sourced):
+    events: list[CapitalEvent] = Field(default_factory=list)  # newest first
+    notes: list[str] = Field(default_factory=list)
+
+
+class Charge(BaseModel):
+    """A mortgage or charge: security given to a lender."""
+
+    charge_number: int | None = None
+    status: str | None = None  # outstanding, fully-satisfied, part-satisfied
+    classification: str | None = None
+    created_on: date | None = None
+    delivered_on: date | None = None
+    satisfied_on: date | None = None
+    lenders: list[str] = Field(default_factory=list)  # persons entitled
+    particulars: str | None = None
+    secured: str | None = None
+
+
+class Charges(Sourced):
+    total: int = 0
+    outstanding: int = 0
+    satisfied: int = 0
+    part_satisfied: int = 0
+    items: list[Charge] = Field(default_factory=list)  # newest first, capped
+    notes: list[str] = Field(default_factory=list)
+
+
+class ParentCompany(BaseModel):
+    """A corporate owner, from the register of persons with significant control."""
+
+    level: int  # 1 = direct owner, 2 = the owner's owner, ...
+    name: str
+    company_number: str | None = None  # if registered at Companies House
+    controls: str | None = None  # the company one level down that it controls
+    natures_of_control: list[str] = Field(default_factory=list)
+    legal_form: str | None = None
+    country_registered: str | None = None
+    status: str | None = None
+    notified_on: date | None = None
+    is_ultimate: bool = False  # top of the chain as far as the UK register shows
+
+
+class Controller(BaseModel):
+    """A person (or non-company body) at the top of an ownership chain, as
+    recorded in the official PSC register."""
+
+    name: str
+    kind: str
+    natures_of_control: list[str] = Field(default_factory=list)
+    of_company: str | None = None
+    of_company_number: str | None = None
+
+
+class Ownership(Sourced):
+    parents: list[ParentCompany] = Field(default_factory=list)  # ordered by level
+    controllers: list[Controller] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class RelatedCompany(BaseModel):
+    """Another company that shares one or more current officers with this one."""
+
+    company_number: str
+    name: str
+    status: str | None = None
+    shared_officers: list[str] = Field(default_factory=list)
+    roles: list[str] = Field(default_factory=list)
+
+
+class RelatedCompanies(Sourced):
+    companies: list[RelatedCompany] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class RiskFlag(BaseModel):
+    code: str  # stable identifier, e.g. accounts_overdue
+    severity: Literal["info", "warning", "high"]
+    message: str
+    evidence: str | None = None
+
+
+class Risk(BaseModel):
+    """Signals computed from registry data (no LLM). A flag is a prompt to look
+    closer, not a verdict."""
+
+    flags: list[RiskFlag] = Field(default_factory=list)
 
 
 # --- website --------------------------------------------------------------
@@ -251,6 +378,11 @@ class CompanyProfile(BaseModel):
     people: People = Field(default_factory=People)
     filings: Filings = Field(default_factory=Filings)
     financials: Financials = Field(default_factory=Financials)
+    capital: Capital = Field(default_factory=Capital)
+    charges: Charges = Field(default_factory=Charges)
+    ownership: Ownership = Field(default_factory=Ownership)
+    related_companies: RelatedCompanies = Field(default_factory=RelatedCompanies)
+    risk: Risk = Field(default_factory=Risk)
     website: Website = Field(default_factory=Website)
     products: list[Product] = Field(default_factory=list)
     tech_stack: list[str] = Field(default_factory=list)

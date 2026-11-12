@@ -24,7 +24,15 @@ personal research. A separate, future program will visualise/categorise the outp
   Tests run with the cache off (`tests/conftest.py`); cache tests opt in with a temp dir.
   Only reuse a cached page if rendering couldn't improve it (probes cache unrendered shells).
 - `sources/`: gathers raw material. `__init__` files import nothing (avoids import cycles).
-  - `companies_house.py`: API client + mapping to the schema.
+  - `companies_house/`: `client.py` (API + filed documents; the document redirect to storage
+    must be followed WITHOUT the API key), `mapping.py` (core data; keeps `RawCompany` so later
+    steps don't refetch), `accounts.py` (iXBRL figures; match tag local names, ignore
+    dimensioned contexts; PDF-only filings are noted, never guessed), `capital.py` (share
+    capital events + charges), `ownership.py` (PSC chain), `related.py` (shared officers),
+    `risk.py` (rule-based flags with evidence), `details.py` (runs them; one failing step
+    leaves a note and the rest continue). `--registry full|basic`.
+    Known API quirks: profile `has_charges` is unreliable (always call /charges); filing dates
+    can lag receipt and year ends float +/-7 days (late-filing flag has a 14-day tolerance).
   - `website/discovery.py`: find the site (user > Wikidata > domain guess + verification).
   - `website/fetch.py`: `Crawler`: robots.txt, delays, same host; thin script-heavy pages are
     retried in a headless browser (`renderer.py`, Playwright). Discovery probes never render.
@@ -73,15 +81,26 @@ Done: Companies House; website discovery + crawl; LLM extraction; Playwright fal
 restructure into `sources/` and `llm/` packages; staged LLM pipeline (`--llm-strategy`);
 local cache. Measured on the user's laptop (qwen3:4b): ~4-5 min per LLM call; Monzo staged
 (5 parts + merge) took 27 min and completed; small sites ~4 min single-call.
-Agreed next (user liked all of these; do in this order): Companies House depth (iXBRL
-accounts, SH01 share allotments, charges, PSC ownership chain, officers' other appointments,
-risk flags); structured data first (JSON-LD/OpenGraph, sitemap.xml); answer checks (enum
-sectors/business model in the schema, grounding check, output cap `num_predict`); then the
-sources below. Longer term: facts store in SQLite with provenance, change tracking.
-New sources should feed the staged pipeline as extra material (pages/documents), not add
-their own LLM plumbing.
+Also done: Companies House depth (accounts, capital, charges, ownership, related, risk flags).
+Tests: older tests run with INFORMANT_REGISTRY=basic (conftest); full depth is tested in
+`tests/test_registry_details.py`.
+
+Agreed next, in this order (the user liked all of these):
+1. Structured data before the LLM (JSON-LD/OpenGraph, sitemap.xml); answer checks (enum
+   sectors/business model in the schema, grounding check that products/tags appear in the
+   text, output cap `num_predict`).
 2. Sources, one at a time: news (Google News RSS + optional Guardian key), Wikipedia (official
    API, needs INFORMANT_CONTACT), web search (official API with free tier, e.g. Brave).
+   New sources feed the staged pipeline as extra material; no separate LLM plumbing.
 3. Customers: extract named client companies into the profile; resolve UK ones to Companies
    House numbers; optional `--with-customers` deep dive; customer links in the index.
-4. Later: iXBRL financials, ATS job feeds (Greenhouse/Lever), SIC descriptions, batch mode, SQLite.
+4. More legal public data the user approved: Companies House bulk downloads (offline
+   screening), WordPress `/wp-json` and Shopify `/products.json` feeds, shared analytics IDs
+   (sister sites), DNS/certificate-transparency signals, ad transparency libraries, PDFs via
+   search API, Land Registry CCOD, Contracts Finder, GLEIF, Gazette, ATS job feeds, Wayback.
+   For large companies with PDF-only accounts: text extraction + LLM is a possible later step.
+5. Longer term: facts store in SQLite with provenance, change tracking, relationship graph.
+6. Last, as an explicit opt-in the user asked to explore at the end: a `--user-agent` option,
+   then maybe review/job sites (Trustpilot, Glassdoor, Indeed; these break site terms).
+The user agreed the stop points: no bypassing logins/paywalls/CAPTCHAs, and no profiles of
+individual people (no employee lists, LinkedIn profiles or inferred emails).

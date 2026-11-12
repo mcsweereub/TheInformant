@@ -54,6 +54,7 @@ def write_atomic(path: Path, text: str) -> None:
 
 def index_entry(profile: CompanyProfile, file_name: str) -> dict[str, Any]:
     ident = profile.identity
+    latest = profile.financials.periods[0] if profile.financials.periods else None
     return {
         "company_number": ident.company_number,
         "name": ident.name,
@@ -64,6 +65,15 @@ def index_entry(profile: CompanyProfile, file_name: str) -> dict[str, Any]:
         "sectors": profile.classification.sectors,
         "sic_codes": [s.code for s in profile.classification.sic_codes],
         "llm_model": profile.website.llm_model,
+        # headline registry figures, so a list view needn't open every profile
+        "accounts_period_end": latest.period_end.isoformat() if latest else None,
+        "turnover": latest.turnover if latest else None,
+        "net_assets": latest.net_assets if latest else None,
+        "employees": latest.employees if latest else None,
+        "ultimate_parent": next((p.name for p in reversed(profile.ownership.parents)
+                                 if p.is_ultimate), None),
+        "flags": {sev: sum(1 for f in profile.risk.flags if f.severity == sev)
+                  for sev in ("high", "warning", "info")},
         "schema_version": profile.schema_version,
         "generated_at": profile.generated_at.isoformat(),
         "file": file_name,
