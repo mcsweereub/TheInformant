@@ -8,3 +8,6 @@ def no_cache_by_default(monkeypatch):
     monkeypatch.setenv("INFORMANT_CACHE", "off")
     monkeypatch.delenv("INFORMANT_CACHE_DIR", raising=False)
     monkeypatch.delenv("INFORMANT_CACHE_DAYS", raising=False)
+    # Older tests mock only the core Companies House endpoints; the deeper registry
+    # steps (accounts, charges, ownership...) are tested in test_registry_details.py.
+    monkeypatch.setenv("INFORMANT_REGISTRY", "basic")
