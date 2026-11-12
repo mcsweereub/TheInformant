@@ -34,7 +34,11 @@ personal research. A separate, future program will visualise/categorise the outp
   - `models.py` backend/model choice; `prompts.py` prompt + SECTORS + output schema (shared by
     all backends); `budget.py` repeated-line removal + fair share per page; `result.py` checks
     on every answer (echoed-prompt guard); `backends/claude.py` (`beta.messages.parse`) and
-    `backends/ollama.py` (`/api/chat` + JSON-schema `format`); `extract.py` dispatcher.
+    `backends/ollama.py` (`/api/chat` + JSON-schema `format`), both exposing
+    `complete(system, user, schema)`; `staged.py` notes-per-part + merge (products/sites are
+    combined in code, the merge call only writes summary/sectors/tags); `extract.py` picks
+    backend + strategy (`--llm-strategy`: auto = single for Claude, staged for Ollama when the
+    de-duplicated text exceeds ~12k chars).
 
 ## Integration
 - TheInformant must stay a standalone console app. A GUI (planned: React + local Python API
@@ -62,9 +66,9 @@ personal research. A separate, future program will visualise/categorise the outp
 
 ## Roadmap
 Done: Companies House; website discovery + crawl; LLM extraction; Playwright fallback;
-restructure into `sources/` and `llm/` packages.
-1. Staged LLM pipeline: per-source "findings" calls (small inputs for local models) + one merge
-   call; `--llm-strategy staged|single|auto` (auto: staged for Ollama, single call for Claude).
+restructure into `sources/` and `llm/` packages; staged LLM pipeline (`--llm-strategy`).
+New sources should feed the staged pipeline as extra material (pages/documents), not add
+their own LLM plumbing.
 2. Sources, one at a time: news (Google News RSS + optional Guardian key), Wikipedia (official
    API, needs INFORMANT_CONTACT), web search (official API with free tier, e.g. Brave).
 3. Customers: extract named client companies into the profile; resolve UK ones to Companies

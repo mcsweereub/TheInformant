@@ -27,7 +27,7 @@ from rich.table import Table
 
 from .sources.companies_house import CompaniesHouseClient
 from .errors import ConfigError, InformantError
-from .llm import ModelOption, choose_backend, current_model, model_options
+from .llm import STRATEGIES, ModelOption, choose_backend, current_model, model_options
 from .pipeline import research_company
 from .progress import ProgressEvent, emit
 from .schema import SCHEMA_VERSION, CompanyProfile
@@ -139,6 +139,9 @@ def lookup(
     browser: str | None = typer.Option(
         None, "--browser", help="Headless browser for JavaScript-built sites: auto, always or never "
         "[default: INFORMANT_BROWSER or auto]."),
+    llm_strategy: str | None = typer.Option(
+        None, "--llm-strategy", help="auto, single (one LLM call) or staged (notes per part, then "
+        "a merge; for local models) [default: INFORMANT_LLM_STRATEGY or auto]."),
     json_mode: bool = JSON_OPT,
     progress: bool = typer.Option(False, "--progress", help="Write JSON progress events to stderr."),
 ) -> None:
@@ -149,8 +152,10 @@ def lookup(
             raise ConfigError("Use --out or --out-file, not both.")
         if browser is not None and browser.lower() not in ("auto", "always", "never"):
             raise ConfigError("--browser must be auto, always or never.")
+        if llm_strategy is not None and llm_strategy.lower() not in STRATEGIES:
+            raise ConfigError("--llm-strategy must be auto, single or staged.")
         kwargs = dict(website=website, web=web, llm=llm, max_pages=max_pages, filings=filings,
-                      browser=browser)
+                      browser=browser, llm_strategy=llm_strategy)
 
         if progress or json_mode:
             callback = _write_progress_line if progress else None
@@ -158,7 +163,7 @@ def lookup(
         else:
             with err.status("Starting...") as spinner:
                 def callback(event: ProgressEvent) -> None:
-                    if event.status == "started" and event.message:
+                    if event.status in ("started", "progress") and event.message:
                         text = event.message
                         if event.stage == "llm" and choose_backend() == "ollama":
                             text += " (local model: this can take a few minutes)"
