@@ -33,6 +33,7 @@ def research_website(
     user_url: str | None = None,
     max_pages: int = 8,
     use_llm: bool = True,
+    llm_strategy: str | None = None,
     progress: ProgressFn | None = None,
 ) -> CompanyProfile:
     """Fill the website-derived sections of `profile` in place and return it."""
@@ -115,13 +116,15 @@ def research_website(
         backend, model = current_model()
         emit(progress, "llm", "started", f"Extracting with {backend}/{model}",
              backend=backend, model=model)
-        llm = extract_with_llm(ident.name, pages)
+        llm = extract_with_llm(ident.name, pages, strategy=llm_strategy, progress=progress)
         site.notes.extend(llm.notes)
         _merge_llm(profile, llm, [p.url for p in pages])
         if llm.data is None:
-            emit(progress, "llm", "failed", llm.notes[-1] if llm.notes else "No result")
+            emit(progress, "llm", "failed", llm.notes[-1] if llm.notes else "No result",
+                 strategy=llm.strategy)
         else:
-            emit(progress, "llm", "done", None, model=llm.model, products=len(profile.products))
+            emit(progress, "llm", "done", None, model=llm.model, strategy=llm.strategy,
+                 products=len(profile.products))
     else:
         emit(progress, "llm", "skipped", "LLM disabled")
     return profile

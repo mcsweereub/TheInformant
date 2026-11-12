@@ -62,6 +62,14 @@ Profiles are written to `output/<number>-<name>.json`.
    phone numbers, company social accounts and tech stack.
 4. **Extract with an LLM** (Claude or a local Ollama model). Summary, sectors from a
    fixed list, tags, business model, target markets, products and offices.
+   `--llm-strategy` controls how the text is sent:
+   - `single`: everything in one call.
+   - `staged`: the text is read in parts (about 9,000 characters each, up to 5 parts),
+     each part yields notes, and a final call merges the notes into the profile. Local
+     models are slow with long inputs, so this lets them finish large sites. A failed
+     part is skipped, and each call has its own 20-minute limit.
+   - `auto` (default): one call for Claude; for Ollama, one call when the text fits
+     (about 12,000 characters), otherwise staged.
 
 Anything skipped or uncertain is recorded in `website.notes`.
 
@@ -125,6 +133,8 @@ informant --env-file C:/path/informant.env lookup ...   # use a different settin
 `{"event": "progress", "stage": "crawl", "status": "done", "message": "5 pages read", "data": {...}, "ts": "..."}`.
 Stages, in order: `resolve`, `companies_house`, `website_discovery`, `crawl`,
 `extract`, `llm`, `save`. Status is `started`, `done`, `skipped` or `failed`.
+During staged extraction, the `llm` stage also sends `progress` events with
+`data.part` and `data.parts` ("Reading part 2 of 5", then "Combining notes").
 
 **Output folder.** Profiles go to `--out <folder>`, or `INFORMANT_OUTPUT_DIR`, or
 `./output`. Files are written atomically (to a temporary file, then renamed),

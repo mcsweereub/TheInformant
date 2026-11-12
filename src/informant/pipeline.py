@@ -60,6 +60,7 @@ def research_company(
     max_pages: int = 8,
     filings: int = 25,
     browser: str | None = None,
+    llm_strategy: str | None = None,
     progress: ProgressFn | None = None,
     ch_client: CompaniesHouseClient | None = None,
     crawler: Crawler | None = None,
@@ -68,6 +69,8 @@ def research_company(
 
     browser: "auto" (headless browser only for JavaScript-built pages), "always" or
     "never"; defaults to INFORMANT_BROWSER or "auto".
+    llm_strategy: "auto", "single" (one LLM call) or "staged" (notes per part, then
+    a merge call); defaults to INFORMANT_LLM_STRATEGY or "auto".
     """
     own_ch = ch_client is None
     ch = ch_client or CompaniesHouseClient(os.environ.get("COMPANIES_HOUSE_API_KEY", ""))
@@ -95,7 +98,8 @@ def research_company(
         crawler = crawler or Crawler(browser=browser)
         try:
             research_website(profile, crawler=crawler, user_url=website,
-                             max_pages=max_pages, use_llm=llm, progress=progress)
+                             max_pages=max_pages, use_llm=llm, llm_strategy=llm_strategy,
+                             progress=progress)
         finally:
             if own_crawler:
                 crawler.close()
