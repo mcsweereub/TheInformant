@@ -8,7 +8,7 @@ import respx
 from typer.testing import CliRunner
 
 from informant import cli
-from informant.companies_house import BASE_URL
+from informant.sources.companies_house import BASE_URL
 from informant.pipeline import research_company
 from informant.storage import INDEX_NAME, load_index
 from test_companies_house import FILINGS, OFFICERS, PROFILE, PSCS

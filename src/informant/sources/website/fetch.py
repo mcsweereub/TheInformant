@@ -1,210 +1,28 @@
 """Polite, small-scale website crawler.
 
-Fetches a company's homepage plus a handful of key pages (about, products,
-careers, contact, news). Deliberately conservative:
+Fetches a company's homepage plus a handful of key pages (chosen by pages.py).
+Deliberately conservative:
   * obeys robots.txt (and its Crawl-delay), identifies itself honestly
   * one request at a time with a delay, same host only, HTML only
   * no login/paywall/CAPTCHA bypass: if a site blocks us we note it and move on
+  * JavaScript-built pages are retried in a headless browser (renderer.py)
 """
 
 from __future__ import annotations
 
 import os
-import re
 import time
-from dataclasses import dataclass, field
-from urllib.parse import urljoin, urldefrag, urlparse
+from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
 import httpx
-from bs4 import BeautifulSoup
 
+from .pages import FALLBACK_PATHS, NOT_FOUND_RE, choose_pages, menu_links
+from .parse import CrawlResult, Page, looks_js_rendered, normalise_url, parse_page, path_key
 from .renderer import BrowserUnavailable, PlaywrightRenderer, Renderer
 
 USER_AGENT = "Mozilla/5.0 (compatible; informant/0.1; personal company research)"
 MAX_BYTES = 3_000_000
-
-# Page kinds we look for, in priority order (earlier kinds win when max_pages is
-# small), with keywords matched against URL path segments and short link labels.
-PAGE_KINDS: dict[str, tuple[str, ...]] = {
-    "about": ("about", "who-we-are", "our-story", "our-company", "company"),
-    "products": ("product", "service", "solution", "what-we-do", "platform", "shop", "menu"),
-    "investors": ("investor", "annual-report", "results"),
-    "customers": ("case-stud", "customer", "client", "portfolio", "success-stor"),
-    "careers": ("career", "jobs", "join-us", "work-with-us", "vacancies", "recruit"),
-    "contact": ("contact", "find-us", "locations", "offices", "stores"),
-    "news": ("news", "press", "media", "blog", "insights"),
-}
-
-# Legal and regulatory pages: long boilerplate that crowds out useful text.
-# Judged by URL and link label, which is far more reliable than judging the prose.
-LEGAL_RE = re.compile(
-    r"terms|conditions|privacy|cookie|legal|polic(?:y|ies)|disclaimer|gdpr|accessib|"
-    r"slavery|complaint|sitemap|regulatory|important-information|service-information|"
-    r"service-quality|information-about|whistleblow|tax-strategy|gender-pay",
-    re.I,
-)
-# Pages tried directly when the homepage doesn't link to one of that kind.
-FALLBACK_PATHS: dict[str, tuple[str, ...]] = {"about": ("/about", "/about-us")}
-_NOT_FOUND_RE = re.compile(r"\b(404|page not found|can.t find (that|this) page)\b", re.I)
-# Links that never make useful research pages when filling spare slots.
-_UTILITY_RE = re.compile(
-    r"log-?in|sign-?in|sign-?up|register|account|basket|cart|checkout|search|wp-admin|"
-    r"wp-login|feed|/tag/|/category/|/author/",
-    re.I,
-)
-_LANGUAGE_PREFIX_RE = re.compile(r"^/[a-z]{2}(?:-[a-z]{2})?(?:/|$)", re.I)  # /fr/, /en-gb/
-
-_SKIP_EXT = re.compile(r"\.(pdf|jpe?g|png|gif|svg|webp|zip|docx?|xlsx?|pptx?|mp4|mp3)$", re.I)
-
-
-@dataclass
-class Page:
-    url: str
-    kind: str
-    status_code: int | None
-    html: str = ""
-    title: str | None = None
-    text: str = ""
-    links: list[tuple[str, str]] = field(default_factory=list)  # (absolute url, link text)
-    headers: dict[str, str] = field(default_factory=dict)
-    rendered: bool = False  # loaded through the headless browser
-
-
-@dataclass
-class CrawlResult:
-    start_url: str
-    final_url: str | None = None
-    pages: list[Page] = field(default_factory=list)
-    headers: dict[str, str] = field(default_factory=dict)  # homepage response headers
-    notes: list[str] = field(default_factory=list)
-
-    @property
-    def ok_pages(self) -> list[Page]:
-        return [p for p in self.pages if p.status_code == 200 and p.text]
-
-
-def looks_js_rendered(page: Page) -> bool:
-    """Little readable text but lots of scripts: content is probably built by JavaScript."""
-    return len(page.text) < 800 and page.html.count("<script") > 3
-
-
-def normalise_url(url: str) -> str:
-    url = url.strip()
-    if not re.match(r"^https?://", url, re.I):
-        url = "https://" + url
-    return url
-
-
-def html_to_text(soup: BeautifulSoup) -> str:
-    for tag in soup(["script", "style", "noscript", "svg", "iframe", "template"]):
-        tag.decompose()
-    text = soup.get_text(separator="\n")
-    lines = (re.sub(r"\s+", " ", line).strip() for line in text.splitlines())
-    return "\n".join(line for line in lines if line)
-
-
-def parse_page(url: str, kind: str, status: int, html: str) -> Page:
-    soup = BeautifulSoup(html, "html.parser")
-    title = soup.title.get_text(strip=True) if soup.title else None
-    links: list[tuple[str, str]] = []
-    for a in soup.find_all("a", href=True):
-        href = urldefrag(urljoin(url, a["href"]))[0]
-        links.append((href, a.get_text(" ", strip=True)))
-    return Page(url=url, kind=kind, status_code=status, html=html, title=title,
-                text=html_to_text(soup), links=links)
-
-
-def _same_site(a: str, b: str) -> bool:
-    ha, hb = urlparse(a).netloc.lower(), urlparse(b).netloc.lower()
-    strip = lambda h: h[4:] if h.startswith("www.") else h  # noqa: E731
-    return strip(ha) == strip(hb)
-
-
-def _path_matches(path: str, keywords: tuple[str, ...]) -> bool:
-    # A path segment that is, or starts with, the keyword: /about, /about-us, /investors
-    return any(re.search(rf"/{re.escape(k)}[a-z]*(?:[-_/.]|$)", path) for k in keywords)
-
-
-def _path_kind(path: str) -> str | None:
-    """The page kind a URL's path clearly names, if any (/contact-us -> contact)."""
-    return next((kind for kind, kws in PAGE_KINDS.items() if _path_matches(path, kws)), None)
-
-
-def _match_score(path: str, text: str, keywords: tuple[str, ...]) -> int | None:
-    """Lower is better; None means the link isn't this kind of page."""
-    if _path_matches(path, keywords):
-        return 0
-    label = text.lower()
-    if 0 < len(label.split()) <= 4:  # short nav labels only, not promotional blurbs
-        for k in keywords:
-            if re.search(rf"\b{re.escape(k.replace('-', ' '))}", label):
-                return 100
-    return None
-
-
-def choose_pages(home: Page, max_extra: int) -> list[tuple[str, str]]:
-    """Pick the best link for each page kind from the homepage's links."""
-    chosen: list[tuple[str, str]] = []
-    seen = {_path_key(home.url)}
-    for kind, keywords in PAGE_KINDS.items():
-        if len(chosen) >= max_extra:
-            break
-        best: tuple[int, str] | None = None
-        for href, text in home.links:
-            if not href.startswith("http") or not _same_site(href, home.url):
-                continue
-            path = urlparse(href).path.lower() or "/"
-            if _SKIP_EXT.search(path) or _path_key(href) in seen:
-                continue
-            if LEGAL_RE.search(path) or LEGAL_RE.search(text):
-                continue
-            match = _match_score(path, text, keywords)
-            if match is None:
-                continue
-            # A label can't overrule an address that clearly names another kind:
-            # a link to /contact-us labelled "About Planlogic" is still the contact page.
-            path_kind = _path_kind(path)
-            if match > 0 and path_kind is not None and path_kind != kind:
-                continue
-            # Then prefer short, shallow paths (".../about" over ".../about/team/jane").
-            score = match + path.count("/") * 10 + len(path)
-            if best is None or score < best[0]:
-                best = (score, href)
-        if best:
-            chosen.append((best[1], kind))
-            seen.add(_path_key(best[1]))
-    return chosen
-
-
-def _path_key(url: str) -> str:
-    """Same-site identity of a page: path only, case-insensitive, no trailing slash."""
-    return urlparse(url).path.lower().rstrip("/") or "/"
-
-
-def menu_links(home: Page, taken: set[str], limit: int) -> list[str]:
-    """Other homepage links, in the order they appear (menus come first), to fill
-    page slots the keyword search left unused. Skips legal and utility pages,
-    deep links (e.g. individual blog posts) and other-language versions."""
-    picked: list[str] = []
-    seen = set(taken) | {_path_key(home.url)}
-    for href, text in home.links:
-        if len(picked) >= limit:
-            break
-        if not href.startswith("http") or not _same_site(href, home.url):
-            continue
-        path = urlparse(href).path or "/"
-        key = _path_key(href)
-        if key in seen or _SKIP_EXT.search(path):
-            continue
-        if LEGAL_RE.search(path) or LEGAL_RE.search(text) or _UTILITY_RE.search(path):
-            continue
-        if key.count("/") > 2 or _LANGUAGE_PREFIX_RE.match(path):
-            continue  # deeper than /section/page, or a translated copy
-        seen.add(key)
-        picked.append(href)
-    return picked
-
 
 BrowserMode = str  # "auto" (only when needed), "always", or "never"
 
@@ -383,7 +201,7 @@ class Crawler:
                     continue
                 page = self.fetch(url, kind, [])
                 if (page and page.status_code == 200 and page.text
-                        and not _NOT_FOUND_RE.search(page.title or "")):
+                        and not NOT_FOUND_RE.search(page.title or "")):
                     result.pages.append(page)
                     break
 
@@ -391,7 +209,7 @@ class Crawler:
         # named on the menu, which no keyword would match).
         room = max_pages - len(result.pages)
         if room > 0:
-            taken = {_path_key(p.url) for p in result.pages} | {_path_key(u) for u, _ in chosen}
+            taken = {path_key(p.url) for p in result.pages} | {path_key(u) for u, _ in chosen}
             for url in menu_links(home, taken, room):
                 page = self.fetch(url, "other", result.notes)
                 if page:

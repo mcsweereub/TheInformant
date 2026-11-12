@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from .crawler import Crawler, CrawlResult
+from .fetch import Crawler
+from .parse import CrawlResult
 from .discovery import discover_website
 from .extract import detect_tech, extract_contacts, extract_social_links, verify_ownership
-from .llm import ExtractionResult, current_model, extract_with_llm
-from .progress import ProgressFn, emit
-from .schema import CompanyProfile, Location, Product, Source, WebPage, Website
+from ...llm import ExtractionResult, current_model, extract_with_llm
+from ...progress import ProgressFn, emit
+from ...schema import CompanyProfile, Location, Product, Source, WebPage, Website
 
 _RANK = {"low": 0, "medium": 1, "high": 2}
 

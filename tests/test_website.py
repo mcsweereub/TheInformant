@@ -6,9 +6,11 @@ import anthropic
 import httpx
 import respx
 
-from informant.crawler import Crawler, choose_pages, parse_page
-from informant.discovery import candidate_domains, discover_website
-from informant.extract import (
+from informant.sources.website.fetch import Crawler
+from informant.sources.website.pages import choose_pages
+from informant.sources.website.parse import parse_page
+from informant.sources.website.discovery import candidate_domains, discover_website
+from informant.sources.website.extract import (
     core_name,
     detect_tech,
     extract_contacts,
@@ -17,7 +19,7 @@ from informant.extract import (
 )
 from informant.llm import SECTORS, extract_with_llm
 from informant.schema import CompanyProfile, Identity, Location
-from informant.website import research_website
+from informant.sources.website.research import research_website
 
 HOME = """<html><head><title>Acme Widgets | Industrial widgets</title>
 <meta name="description" content="Widgets for industry.">
@@ -223,7 +225,7 @@ def test_research_website_end_to_end(monkeypatch):
     respx.route(host="127.0.0.1").pass_through()
     server, client = _fake_server()
     monkeypatch.setenv("INFORMANT_LLM", "claude")
-    monkeypatch.setattr("informant.llm.anthropic.Anthropic", lambda: client)
+    monkeypatch.setattr("informant.llm.backends.claude.anthropic.Anthropic", lambda: client)
     profile = CompanyProfile(
         query="01234567",
         identity=Identity(name="ACME WIDGETS LIMITED", company_number="01234567"),
@@ -444,7 +446,7 @@ def test_customers_kind_and_label_cannot_overrule_path():
 
 
 def test_menu_links_fill_spare_slots():
-    from informant.crawler import menu_links
+    from informant.sources.website.pages import menu_links
     home = parse_page("https://planlogic.example/", "home", 200, PLANLOGIC_LIKE)
     taken = {"/work-with-us", "/case-studies", "/contact-us"}
     # /eos/ and /EOS are one page; language copies, deep posts, login and legal are skipped.

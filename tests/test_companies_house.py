@@ -2,7 +2,7 @@ import httpx
 import pytest
 import respx
 
-from informant.companies_house import (
+from informant.sources.companies_house import (
     BASE_URL,
     CompaniesHouseClient,
     CompaniesHouseError,

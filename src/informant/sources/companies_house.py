@@ -14,8 +14,8 @@ from typing import Any
 
 import httpx
 
-from .errors import ConfigError, NotFoundError, UpstreamError
-from .schema import (
+from ..errors import ConfigError, NotFoundError, UpstreamError
+from ..schema import (
     Classification,
     Compliance,
     Filing,
