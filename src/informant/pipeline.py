@@ -13,17 +13,17 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
-from .companies_house import (
+from .sources.companies_house import (
     CompaniesHouseClient,
     SearchHit,
     fetch_company,
     normalise_company_number,
 )
-from .crawler import Crawler
+from .sources.website.fetch import Crawler
 from .errors import NotFoundError
 from .progress import ProgressFn, emit
 from .schema import CompanyProfile
-from .website import research_website
+from .sources.website.research import research_website
 
 
 @dataclass

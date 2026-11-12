@@ -25,7 +25,7 @@ from dotenv import load_dotenv, set_key
 from rich.console import Console
 from rich.table import Table
 
-from .companies_house import CompaniesHouseClient
+from .sources.companies_house import CompaniesHouseClient
 from .errors import ConfigError, InformantError
 from .llm import ModelOption, choose_backend, current_model, model_options
 from .pipeline import research_company

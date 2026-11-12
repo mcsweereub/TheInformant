@@ -2,8 +2,9 @@
 
 import respx
 
-from informant.crawler import Crawler, looks_js_rendered, parse_page
-from informant.renderer import BrowserUnavailable
+from informant.sources.website.fetch import Crawler
+from informant.sources.website.parse import looks_js_rendered, parse_page
+from informant.sources.website.renderer import BrowserUnavailable
 
 SHELL = ("<html><head><title>App</title>" + "<script src='/a.js'></script>" * 5 +
          "</head><body><div id='root'></div><noscript>Enable JavaScript</noscript></body></html>")

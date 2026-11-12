@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from urllib.parse import unquote, urlparse
 
-from .crawler import CrawlResult, Page
+from .parse import CrawlResult, Page
 
 # --- contacts -------------------------------------------------------------
 

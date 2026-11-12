@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from .crawler import Crawler
+from .fetch import Crawler
 from .extract import core_name, verify_ownership
 
 WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
