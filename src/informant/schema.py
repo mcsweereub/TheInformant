@@ -18,7 +18,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-SCHEMA_VERSION = "0.3.0"
+SCHEMA_VERSION = "0.4.0"
 
 SourceName = Literal[
     "companies_house",
@@ -186,6 +186,8 @@ class WebPage(BaseModel):
     title: str | None = None
     text_chars: int = 0  # how much readable text the page had
     rendered: bool = False  # loaded with a headless browser (JavaScript-built page)
+    fetched_at: datetime | None = None  # when the page was really downloaded
+    cached: bool = False  # this run reused a locally cached copy
 
 
 class Website(Sourced):

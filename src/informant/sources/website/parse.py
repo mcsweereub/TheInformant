@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from urllib.parse import urldefrag, urljoin, urlparse
 
 from bs4 import BeautifulSoup
@@ -20,6 +21,8 @@ class Page:
     links: list[tuple[str, str]] = field(default_factory=list)  # (absolute url, link text)
     headers: dict[str, str] = field(default_factory=dict)
     rendered: bool = False  # loaded through the headless browser
+    fetched_at: datetime | None = None  # when it was really downloaded
+    from_cache: bool = False  # served from the local cache this run
 
 
 @dataclass

@@ -157,11 +157,13 @@ def extract_staged(company_name: str, pages: list, complete: CompleteFn,
     model: str | None = None
     elapsed = 0.0
     calls = 0
+    from_cache = 0
 
     for i, chunk in enumerate(chunks, 1):
         emit(progress, "llm", "progress", f"Reading part {i} of {parts}", part=i, parts=parts)
         c = complete(STAGE_SYSTEM_PROMPT, stage_message(company_name, chunk, i, parts), ChunkFindings)
         calls += 1
+        from_cache += c.cached
         model = c.model or model
         elapsed += c.elapsed
         if c.data is None:
@@ -197,6 +199,7 @@ def extract_staged(company_name: str, pages: list, complete: CompleteFn,
                  merge_message(company_name, facts, [p.name for p in products], markets),
                  MergedProfile)
     calls += 1
+    from_cache += m.cached
     elapsed += m.elapsed
     merged: MergedProfile | None = m.data
     if merged is None or echoed(merged.summary):
@@ -206,6 +209,7 @@ def extract_staged(company_name: str, pages: list, complete: CompleteFn,
                                sectors=["Other"], tags=[], target_markets=markets)
 
     notes.append(f"staged extraction: {parts} part(s) + merge, {calls} calls"
+                 + (f" ({from_cache} answered from the local cache)" if from_cache else "")
                  + (f", {elapsed:.0f}s" if elapsed else ""))
     data = WebsiteExtraction(
         summary=merged.summary,

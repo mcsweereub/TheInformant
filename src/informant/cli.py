@@ -26,6 +26,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .sources.companies_house import CompaniesHouseClient
+from .cache import cache_stats, clear_cache
 from .errors import ConfigError, InformantError
 from .llm import STRATEGIES, ModelOption, choose_backend, current_model, model_options
 from .pipeline import research_company
@@ -142,6 +143,11 @@ def lookup(
     llm_strategy: str | None = typer.Option(
         None, "--llm-strategy", help="auto, single (one LLM call) or staged (notes per part, then "
         "a merge; for local models) [default: INFORMANT_LLM_STRATEGY or auto]."),
+    refresh: bool = typer.Option(
+        False, "--refresh", help="Re-download pages even if cached (unchanged pages still reuse "
+        "cached LLM answers)."),
+    cache: bool = typer.Option(
+        True, "--cache/--no-cache", help="Use the local cache of pages and LLM answers."),
     json_mode: bool = JSON_OPT,
     progress: bool = typer.Option(False, "--progress", help="Write JSON progress events to stderr."),
 ) -> None:
@@ -155,7 +161,8 @@ def lookup(
         if llm_strategy is not None and llm_strategy.lower() not in STRATEGIES:
             raise ConfigError("--llm-strategy must be auto, single or staged.")
         kwargs = dict(website=website, web=web, llm=llm, max_pages=max_pages, filings=filings,
-                      browser=browser, llm_strategy=llm_strategy)
+                      browser=browser, llm_strategy=llm_strategy, use_cache=cache,
+                      refresh=refresh)
 
         if progress or json_mode:
             callback = _write_progress_line if progress else None
@@ -348,6 +355,38 @@ def model_cmd(
             out.print(f"[yellow]{w}[/yellow]")
 
     _run("model", json_mode, body)
+
+
+# --- cache --------------------------------------------------------------------
+
+
+@app.command("cache")
+def cache_cmd(
+    clear: bool = typer.Option(False, "--clear", help="Delete cached entries."),
+    pages_only: bool = typer.Option(False, "--pages", help="With --clear: only crawled pages."),
+    llm_only: bool = typer.Option(False, "--llm", help="With --clear: only LLM answers."),
+    json_mode: bool = JSON_OPT,
+) -> None:
+    """Show (or clear) the local cache of crawled pages and LLM answers."""
+
+    def body() -> None:
+        removed = None
+        if clear:
+            both = not (pages_only or llm_only)
+            removed = clear_cache(pages=both or pages_only, llm=both or llm_only)
+        stats = cache_stats()
+        if json_mode:
+            print_json({"ok": True, "command": "cache", "removed": removed, **stats})
+            return
+        if removed is not None:
+            out.print(f"[green]Removed {removed} cached file(s).[/green]")
+        state = "on" if stats["enabled"] else "off (INFORMANT_CACHE)"
+        out.print(f"Cache: {stats['path']}  [{state}]")
+        for name, label in (("pages", "crawled pages"), ("llm", "LLM answers")):
+            s = stats[name]
+            out.print(f"  {label}: {s['entries']} ({s['bytes'] / 1_048_576:.1f} MB)")
+
+    _run("cache", json_mode, body)
 
 
 # --- schema / version ---------------------------------------------------------

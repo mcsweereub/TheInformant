@@ -9,10 +9,10 @@ import time
 import anthropic
 from pydantic import BaseModel
 
-from ..budget import TOTAL_CHAR_LIMIT, build_page_text
+from ..budget import TOTAL_CHAR_LIMIT
 from ..models import DEFAULT_MODEL
-from ..prompts import SYSTEM_PROMPT, WebsiteExtraction, user_message
-from ..result import ExtractionResult, finish
+from ..result import ExtractionResult
+from ..single import extract_single
 from .base import Completion
 
 DEFAULT_EFFORT = "low"  # extraction from supplied text is a simple task
@@ -56,11 +56,6 @@ def complete(system: str, user: str, schema: type[BaseModel],
 
 def extract_with_claude(company_name: str, pages: list,
                         client: anthropic.Anthropic | None = None) -> ExtractionResult:
-    """Single-call extraction: all pages in one request."""
-    page_text, notes = build_page_text(pages, total_limit=TOTAL_CHAR_LIMIT)
-    if not page_text:
-        return ExtractionResult(None, notes=["no page text to send to the LLM"])
-    c = complete(SYSTEM_PROMPT, user_message(company_name, page_text), WebsiteExtraction, client)
-    if c.data is None:
-        return ExtractionResult(None, model=c.model, notes=notes + c.notes)
-    return finish(c.data, c.model, notes)
+    """Single-call extraction: all pages in one request (no caching)."""
+    return extract_single(
+        company_name, pages, lambda s, u, schema: complete(s, u, schema, client), TOTAL_CHAR_LIMIT)

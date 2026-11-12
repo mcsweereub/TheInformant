@@ -73,6 +73,28 @@ Profiles are written to `output/<number>-<name>.json`.
 
 Anything skipped or uncertain is recorded in `website.notes`.
 
+## Cache
+
+Crawled pages and LLM answers are kept in `.informant_cache/` (set `INFORMANT_CACHE_DIR`
+to move it), so a repeat lookup takes seconds instead of minutes, and a run that failed
+part-way picks up where it stopped.
+
+- **Pages** are reused for 7 days (`INFORMANT_CACHE_DAYS`). Each page in the profile records
+  `fetched_at` (when it was really downloaded) and `cached`.
+- **LLM answers** are reused whenever the model, the prompt and the text sent are all
+  identical. Change any of them (pick another model, or the page changes) and a fresh call
+  is made, so old companies can be re-extracted with a better model without re-crawling.
+
+```sh
+uv run informant lookup 00502851 --refresh    # re-download pages (unchanged pages reuse LLM answers)
+uv run informant lookup 00502851 --no-cache   # ignore the cache completely
+uv run informant cache                        # where it is and how big
+uv run informant cache --clear                # empty it (--pages or --llm for one half)
+```
+
+`INFORMANT_CACHE=off` turns it off. The cache holds copies of public web pages; it's
+ignored by git.
+
 ## Output format
 
 Defined in [src/informant/schema.py](src/informant/schema.py). Every section is
