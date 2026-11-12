@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from .cache import LlmCache, PageCache, cache_enabled
 from .sources.companies_house import (
     CompaniesHouseClient,
     SearchHit,
@@ -61,6 +62,8 @@ def research_company(
     filings: int = 25,
     browser: str | None = None,
     llm_strategy: str | None = None,
+    use_cache: bool = True,
+    refresh: bool = False,
     progress: ProgressFn | None = None,
     ch_client: CompaniesHouseClient | None = None,
     crawler: Crawler | None = None,
@@ -71,6 +74,8 @@ def research_company(
     "never"; defaults to INFORMANT_BROWSER or "auto".
     llm_strategy: "auto", "single" (one LLM call) or "staged" (notes per part, then
     a merge call); defaults to INFORMANT_LLM_STRATEGY or "auto".
+    use_cache: reuse locally cached pages and LLM answers (see cache.py).
+    refresh: re-download pages even if cached (unchanged pages still reuse LLM answers).
     """
     own_ch = ch_client is None
     ch = ch_client or CompaniesHouseClient(os.environ.get("COMPANIES_HOUSE_API_KEY", ""))
@@ -95,10 +100,13 @@ def research_company(
 
     if web:
         own_crawler = crawler is None
-        crawler = crawler or Crawler(browser=browser)
+        caching = use_cache and cache_enabled()
+        crawler = crawler or Crawler(
+            browser=browser, cache=PageCache(refresh=refresh) if caching else None)
         try:
             research_website(profile, crawler=crawler, user_url=website,
                              max_pages=max_pages, use_llm=llm, llm_strategy=llm_strategy,
+                             llm_cache=LlmCache() if caching else None,
                              progress=progress)
         finally:
             if own_crawler:

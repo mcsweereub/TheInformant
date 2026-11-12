@@ -19,6 +19,10 @@ personal research. A separate, future program will visualise/categorise the outp
 - `cli.py`: typer CLI. Every command supports `--json` (one JSON object on stdout, no prompts).
   Human messages go to stderr. This machine contract is public: keep it stable.
 - `storage.py`: atomic saves + per-folder `index.json`. `errors.py`: stable `code` + `exit_code`.
+- `cache.py`: `.informant_cache/` with crawled pages (7-day TTL) and LLM answers (keyed by
+  model + prompts + schema; never expire). `--refresh`, `--no-cache`, `informant cache`.
+  Tests run with the cache off (`tests/conftest.py`); cache tests opt in with a temp dir.
+  Only reuse a cached page if rendering couldn't improve it (probes cache unrendered shells).
 - `sources/`: gathers raw material. `__init__` files import nothing (avoids import cycles).
   - `companies_house.py`: API client + mapping to the schema.
   - `website/discovery.py`: find the site (user > Wikidata > domain guess + verification).
@@ -66,7 +70,14 @@ personal research. A separate, future program will visualise/categorise the outp
 
 ## Roadmap
 Done: Companies House; website discovery + crawl; LLM extraction; Playwright fallback;
-restructure into `sources/` and `llm/` packages; staged LLM pipeline (`--llm-strategy`).
+restructure into `sources/` and `llm/` packages; staged LLM pipeline (`--llm-strategy`);
+local cache. Measured on the user's laptop (qwen3:4b): ~4-5 min per LLM call; Monzo staged
+(5 parts + merge) took 27 min and completed; small sites ~4 min single-call.
+Agreed next (user liked all of these; do in this order): Companies House depth (iXBRL
+accounts, SH01 share allotments, charges, PSC ownership chain, officers' other appointments,
+risk flags); structured data first (JSON-LD/OpenGraph, sitemap.xml); answer checks (enum
+sectors/business model in the schema, grounding check, output cap `num_predict`); then the
+sources below. Longer term: facts store in SQLite with provenance, change tracking.
 New sources should feed the staged pipeline as extra material (pages/documents), not add
 their own LLM plumbing.
 2. Sources, one at a time: news (Google News RSS + optional Guardian key), Wikipedia (official

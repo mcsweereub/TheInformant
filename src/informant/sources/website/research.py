@@ -6,6 +6,7 @@ from .fetch import Crawler
 from .parse import CrawlResult
 from .discovery import discover_website
 from .extract import detect_tech, extract_contacts, extract_social_links, verify_ownership
+from ...cache import LlmCache
 from ...llm import ExtractionResult, current_model, extract_with_llm
 from ...progress import ProgressFn, emit
 from ...schema import CompanyProfile, Location, Product, Source, WebPage, Website
@@ -34,6 +35,7 @@ def research_website(
     max_pages: int = 8,
     use_llm: bool = True,
     llm_strategy: str | None = None,
+    llm_cache: LlmCache | None = None,
     progress: ProgressFn | None = None,
 ) -> CompanyProfile:
     """Fill the website-derived sections of `profile` in place and return it."""
@@ -73,7 +75,8 @@ def research_website(
     pages = result.ok_pages
     site.pages = [
         WebPage(url=p.url, kind=p.kind, status_code=p.status_code, title=p.title,
-                text_chars=len(p.text), rendered=p.rendered)
+                text_chars=len(p.text), rendered=p.rendered,
+                fetched_at=p.fetched_at, cached=p.from_cache)
         for p in result.pages
     ]
     if not pages:
@@ -85,10 +88,15 @@ def research_website(
     rendered = sum(1 for p in pages if p.rendered)
     emit(progress, "crawl", "done",
          f"{len(pages)} pages read" + (f" ({rendered} with the headless browser)" if rendered else ""),
-         pages=len(pages), rendered=rendered)
+         pages=len(pages), rendered=rendered,
+         cached=sum(1 for p in pages if p.from_cache))
     emit(progress, "extract", "started", "Contacts, social links and tech stack")
 
+    # Provenance uses the real download time, which may be earlier for cached pages.
+    fetched = [p.fetched_at for p in pages if p.fetched_at]
     web_source = Source(name="website", url=site.url)
+    if fetched:
+        web_source.retrieved_at = min(fetched)
     site.sources = [web_source]
     site.title = pages[0].title
     site.meta_description = _page_meta_description(result)
@@ -116,7 +124,8 @@ def research_website(
         backend, model = current_model()
         emit(progress, "llm", "started", f"Extracting with {backend}/{model}",
              backend=backend, model=model)
-        llm = extract_with_llm(ident.name, pages, strategy=llm_strategy, progress=progress)
+        llm = extract_with_llm(ident.name, pages, strategy=llm_strategy, progress=progress,
+                               cache=llm_cache)
         site.notes.extend(llm.notes)
         _merge_llm(profile, llm, [p.url for p in pages])
         if llm.data is None:

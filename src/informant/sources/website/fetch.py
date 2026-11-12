@@ -17,6 +17,8 @@ from urllib.robotparser import RobotFileParser
 
 import httpx
 
+from ...cache import PageCache
+from ...schema import utcnow
 from .pages import FALLBACK_PATHS, NOT_FOUND_RE, choose_pages, menu_links
 from .parse import CrawlResult, Page, looks_js_rendered, normalise_url, parse_page, path_key
 from .renderer import BrowserUnavailable, PlaywrightRenderer, Renderer
@@ -31,8 +33,10 @@ class Crawler:
     def __init__(self, *, delay: float = 1.0, timeout: float = 15.0,
                  client: httpx.Client | None = None,
                  browser: BrowserMode | None = None,
-                 renderer: Renderer | None = None) -> None:
+                 renderer: Renderer | None = None,
+                 cache: PageCache | None = None) -> None:
         self.delay = delay
+        self.cache = cache  # None = no page cache
         mode = (browser or os.environ.get("INFORMANT_BROWSER") or "auto").lower()
         if mode not in ("auto", "always", "never"):
             raise ValueError(f"browser mode must be auto, always or never, not {mode!r}")
@@ -116,9 +120,48 @@ class Crawler:
             return Page(url=final_url, kind=kind, status_code=status)
         page = parse_page(final_url, kind, status, html[:MAX_BYTES])
         page.rendered = True
+        page.fetched_at = utcnow()
         return page
 
+    # --- cache ------------------------------------------------------------
+
+    def _from_cache(self, url: str, kind: str) -> Page | None:
+        if self.cache is None:
+            return None
+        hit = self.cache.get(url)
+        if hit is None:
+            return None
+        page = parse_page(hit.final_url, kind, hit.status_code, hit.html)
+        page.headers = hit.headers
+        page.rendered = hit.rendered
+        page.fetched_at = hit.fetched_at
+        page.from_cache = True
+        return page
+
+    def _store(self, url: str, page: Page | None) -> Page | None:
+        if (self.cache is not None and page is not None and not page.from_cache
+                and page.status_code == 200 and page.html):
+            self.cache.put(url, final_url=page.url, status_code=200, html=page.html,
+                           headers=page.headers, rendered=page.rendered,
+                           fetched_at=page.fetched_at or utcnow())
+        return page
+
+    def _cache_hit_is_enough(self, page: Page, allow_render: bool) -> bool:
+        """A cached copy fetched without the browser may be a JavaScript shell (discovery
+        probes never render), so only reuse it when rendering couldn't add anything."""
+        if page.rendered or not allow_render or self.browser_mode == "never":
+            return True
+        if self.browser_mode == "always":
+            return False
+        return not looks_js_rendered(page)
+
     def fetch(self, url: str, kind: str, notes: list[str], *, allow_render: bool = True) -> Page | None:
+        cached = self._from_cache(url, kind)
+        if cached is not None and self._cache_hit_is_enough(cached, allow_render):
+            if cached.rendered and kind == "home":
+                self._js_site = True
+            return cached  # no request made, so nothing to ask robots.txt
+
         if not self.allowed(url):
             notes.append(f"robots.txt disallows {url}; skipped")
             return None
@@ -127,9 +170,9 @@ class Crawler:
         if allow_render and (self.browser_mode == "always" or self._js_site):
             page = self._render(url, kind, notes)
             if page is not None and page.status_code == 200 and page.text:
-                return page
+                return self._store(url, page)
 
-        page = self._fetch_http(url, kind, notes)
+        page = cached or self._fetch_http(url, kind, notes)
 
         # Thin, script-heavy page: try again in the browser, keep it if it shows more.
         if (allow_render and self.browser_mode == "auto" and page is not None
@@ -139,8 +182,8 @@ class Crawler:
                 rendered.headers = page.headers
                 if kind == "home":
                     self._js_site = True
-                return rendered
-        return page
+                return self._store(url, rendered)
+        return self._store(url, page)
 
     def _fetch_http(self, url: str, kind: str, notes: list[str]) -> Page | None:
         self._wait(self._crawl_delay(url))
@@ -158,6 +201,7 @@ class Crawler:
         html = resp.text[:MAX_BYTES]
         page = parse_page(str(resp.url), kind, resp.status_code, html)
         page.headers = dict(resp.headers)
+        page.fetched_at = utcnow()
         return page
 
     def crawl(self, start_url: str, max_pages: int = 8) -> CrawlResult:
@@ -214,6 +258,13 @@ class Crawler:
                 page = self.fetch(url, "other", result.notes)
                 if page:
                     result.pages.append(page)
+
+        cached = [p for p in result.pages if p.from_cache]
+        if cached:
+            oldest = min(p.fetched_at for p in cached if p.fetched_at)
+            result.notes.append(
+                f"{len(cached)} of {len(result.pages)} pages came from the local cache "
+                f"(fetched {oldest:%Y-%m-%d}); use --refresh to re-fetch")
         return result
 
     def probe(self, url: str) -> Page | None:

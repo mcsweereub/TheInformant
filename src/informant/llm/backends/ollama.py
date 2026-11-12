@@ -9,10 +9,10 @@ import time
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from ..budget import OLLAMA_TOTAL_CHAR_LIMIT, build_page_text
+from ..budget import OLLAMA_TOTAL_CHAR_LIMIT
 from ..models import DEFAULT_OLLAMA_MODEL, ollama_host
-from ..prompts import SYSTEM_PROMPT, WebsiteExtraction, user_message
-from ..result import ExtractionResult, finish
+from ..result import ExtractionResult
+from ..single import extract_single
 from .base import Completion
 
 DEFAULT_OLLAMA_NUM_CTX = 16384  # tokens; Ollama's own default is too small for web pages
@@ -91,12 +91,7 @@ def supports_thinking(http: httpx.Client, host: str, model: str) -> bool:
 
 def extract_with_ollama(company_name: str, pages: list,
                         http: httpx.Client | None = None) -> ExtractionResult:
-    """Single-call extraction: all pages (up to the local budget) in one request."""
-    page_text, notes = build_page_text(pages, total_limit=OLLAMA_TOTAL_CHAR_LIMIT)
-    if not page_text:
-        return ExtractionResult(None, notes=["no page text to send to the LLM"])
-    c = complete(SYSTEM_PROMPT, user_message(company_name, page_text), WebsiteExtraction, http)
-    if c.data is None:
-        return ExtractionResult(None, model=c.model, notes=notes + c.notes)
-    notes.append(f"{c.model} took {c.elapsed:.0f}s")
-    return finish(c.data, c.model, notes)
+    """Single-call extraction: all pages (up to the local budget) in one request (no caching)."""
+    return extract_single(
+        company_name, pages, lambda s, u, schema: complete(s, u, schema, http),
+        OLLAMA_TOTAL_CHAR_LIMIT)

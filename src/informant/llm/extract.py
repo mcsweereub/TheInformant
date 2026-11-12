@@ -5,6 +5,8 @@ Strategy (INFORMANT_LLM_STRATEGY or --llm-strategy):
   staged  notes per part, then a merge call (see staged.py)
   auto    Claude: single (its context is huge, and fewer calls cost less).
           Ollama: single when the text fits comfortably, otherwise staged.
+
+Pass an LlmCache to answer repeated, identical calls from disk.
 """
 
 from __future__ import annotations
@@ -16,8 +18,11 @@ import anthropic
 from ..errors import ConfigError
 from ..progress import ProgressFn
 from .backends import claude, ollama
-from .models import choose_backend
+from .backends.base import CompleteFn, with_cache
+from .budget import OLLAMA_TOTAL_CHAR_LIMIT, TOTAL_CHAR_LIMIT
+from .models import DEFAULT_MODEL, choose_backend
 from .result import ExtractionResult
+from .single import extract_single
 from .staged import extract_staged, needs_staging
 
 STRATEGIES = ("auto", "single", "staged")
@@ -35,25 +40,34 @@ def choose_strategy(backend: str, pages: list, requested: str | None = None) -> 
     return "staged" if needs_staging(pages, OLLAMA_SINGLE_LIMIT) else "single"
 
 
+def _model_id(backend: str) -> str:
+    """Identifies the configured model for cache keys (before any call is made)."""
+    if backend == "claude":
+        model = os.environ.get("INFORMANT_MODEL", DEFAULT_MODEL)
+        effort = os.environ.get("INFORMANT_EFFORT", claude.DEFAULT_EFFORT)
+        return f"claude/{model}/effort={effort}"
+    return ollama.model_label()
+
+
 def extract_with_llm(company_name: str, pages: list,
                      client: anthropic.Anthropic | None = None, *,
                      strategy: str | None = None,
-                     progress: ProgressFn | None = None) -> ExtractionResult:
+                     progress: ProgressFn | None = None,
+                     cache=None) -> ExtractionResult:
     """Run whichever backend is configured. Passing an Anthropic client forces Claude."""
     backend = "claude" if client is not None or choose_backend() == "claude" else "ollama"
     chosen = choose_strategy(backend, pages, strategy)
 
-    if chosen == "single":
-        if backend == "claude":
-            result = claude.extract_with_claude(company_name, pages, client)
-        else:
-            result = ollama.extract_with_ollama(company_name, pages)
-        result.strategy = "single"
-        return result
-
+    complete: CompleteFn
     if backend == "claude":
         def complete(system, user, schema):
             return claude.complete(system, user, schema, client)
     else:
         complete = ollama.complete
+    if cache is not None:
+        complete = with_cache(complete, cache, _model_id(backend))
+
+    if chosen == "single":
+        limit = TOTAL_CHAR_LIMIT if backend == "claude" else OLLAMA_TOTAL_CHAR_LIMIT
+        return extract_single(company_name, pages, complete, limit)
     return extract_staged(company_name, pages, complete, progress)
