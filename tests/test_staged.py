@@ -33,10 +33,12 @@ def filler(label: str, chars: int) -> str:
     return "\n".join(lines)
 
 
+INVESTOR_FACTS = ("Acme was founded in Leeds in 1951. In 2021 Acme raised £5 million in a Series A "
+                  "led by Northern Ventures, which now owns 20% of Acme.")
 SMALL = [page("home", "/", filler("Home", 2_000)), page("about", "/about", filler("About", 2_000))]
 LARGE = [page("home", "/", filler("Home", 14_000)),
          page("products", "/products", filler("Products", 14_000)),
-         page("investors", "/investors", filler("Investors", 3_000))]
+         page("investors", "/investors", filler("Investors", 3_000) + "\n" + INVESTOR_FACTS)]
 
 STAGE_ANSWER = {
     "key_facts": ["Acme makes industrial widgets.", "Acme sells to UK factories."],
@@ -45,6 +47,16 @@ STAGE_ANSWER = {
     "offices": [{"label": "Head office", "address": "1 High St", "locality": "London",
                  "country": "United Kingdom", "source_page": "https://acme.example/"}],
     "target_markets": ["UK manufacturers"],
+    "milestones": [
+        {"year": "1951", "event": "Acme was founded in Leeds", "source_page": "https://acme.example/investors"},
+        {"year": "2021", "event": "Acme raised a Series A", "source_page": "https://acme.example/investors"},
+        {"year": "1999", "event": "Acme opened a moon base", "source_page": "https://acme.example/"},  # invented
+    ],
+    "funding_rounds": [{"year": "2021", "round": "Series A", "amount": "£5 million",
+                        "investors": ["Northern Ventures", "Imaginary Capital"],
+                        "source_page": "https://acme.example/investors"}],
+    "shareholders": [{"name": "Northern Ventures", "stake": "20%",
+                      "source_page": "https://acme.example/investors"}],
 }
 MERGE_ANSWER = {
     "summary": "Acme makes industrial widgets for UK factories.",
@@ -53,7 +65,9 @@ MERGE_ANSWER = {
     "tags": ["widgets", "industrial"],
     "target_markets": ["UK manufacturers"],
 }
-SINGLE_ANSWER = dict(MERGE_ANSWER, products=STAGE_ANSWER["products"], offices=STAGE_ANSWER["offices"])
+SINGLE_ANSWER = dict(MERGE_ANSWER, products=STAGE_ANSWER["products"], offices=STAGE_ANSWER["offices"],
+                     key_facts=STAGE_ANSWER["key_facts"], milestones=[], funding_rounds=[],
+                     shareholders=[])
 
 
 class FakeOllama:
@@ -187,8 +201,8 @@ def test_failed_merge_falls_back_to_notes():
 @respx.mock
 def test_echoed_notes_are_ignored():
     echo = dict(STAGE_ANSWER, key_facts=[
-        "up to 12 short, self-contained sentences about what the company does",
-        "who it sells to, where it operates, how big it is, its history"])
+        "short, self-contained sentences about what the company does",
+        "who it sells to, where it operates, how big it is, its partners"])
     FakeOllama(stage=echo)
     result = extract_with_llm("Acme", LARGE)
     assert result.data is None
@@ -220,3 +234,18 @@ def test_cli_rejects_bad_strategy(tmp_path, monkeypatch):
     result = CliRunner().invoke(cli.app, ["lookup", "01234567", "--json", "--llm-strategy", "fast"])
     assert result.exit_code == 3
     assert json.loads(result.stdout)["error"]["code"] == "config_error"
+
+
+@respx.mock
+def test_history_funding_and_shareholders_are_collected_and_checked():
+    FakeOllama()
+    d = extract_with_llm("Acme", LARGE).data
+    # Every part returns the same milestones: de-duplicated, sorted, invented one dropped.
+    assert [(m.year, m.event) for m in d.milestones] == [
+        ("1951", "Acme was founded in Leeds"), ("2021", "Acme raised a Series A")]
+    assert len(d.funding_rounds) == 1
+    r = d.funding_rounds[0]
+    assert (r.year, r.round, r.amount, r.investors) == ("2021", "Series A", "£5 million", ["Northern Ventures"])
+    assert [(s.name, s.stake) for s in d.shareholders] == [("Northern Ventures", "20%")]
+    # "Acme sells to UK factories." isn't supported by the page text, so it's dropped.
+    assert d.key_facts == ["Acme makes industrial widgets."]

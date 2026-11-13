@@ -61,12 +61,22 @@ BusinessModelField = Annotated[BusinessModel, BeforeValidator(_known_business_mo
 TagList = Annotated[list[str], _at_most(MAX_TAGS), Field(max_length=MAX_TAGS)]
 MarketList = Annotated[list[str], _at_most(MAX_MARKETS), Field(max_length=MAX_MARKETS)]
 FactList = Annotated[list[str], _at_most(MAX_FACTS), Field(max_length=MAX_FACTS)]
+MAX_MILESTONES, MAX_FUNDING, MAX_SHAREHOLDERS = 20, 15, 15
+
+# Shared by the single-call and per-part prompts.
+KEY_FACTS_GUIDE = (
+    "Give up to 12 key facts: short, self-contained sentences about what the company does, who "
+    "it sells to, where it operates, how big it is, its partners and its notable achievements. "
+    "Each sentence names the company instead of saying \"they\".")
+HISTORY_AND_FUNDING_GUIDE = """List up to 20 milestones from the company's history: dated events such as its founding, launches, entering new markets, acquisitions, mergers, stock market listings, rebrands, closures and legal or regulatory events. Give the year as four digits and the event as one short sentence. Leave out events about individual people.
+List the funding rounds the text describes (investment or share sales), each with the year, the kind of round (for example seed, Series A, IPO, private placement), the amount as written, and the names of the investing organisations.
+List notable shareholders: organisations (investment funds, companies, banks, governments) that the text says own shares in the company, with the stake as written if given. Leave out individual people."""
 
 SYSTEM_PROMPT = f"""You read the text of a company's own website and record facts about that company for a personal research database. You reply with JSON only.
 
 Work only from the website text you are given. When the pages don't state something, use an empty list, or the word unknown for a single value. Don't add facts from general knowledge.
 
-Record facts about the company, never about people: leave out the names and details of individual employees, directors and private customers.
+Record facts about the company, never about people: leave out the names and details of individual employees, directors, founders and private customers. Don't name any individual person in any value; write "the founders" or "the chief executive" instead.
 
 What to record:
 Write a summary of two or three plain sentences saying what the company does and who its customers are.
@@ -75,10 +85,32 @@ Give between three and ten tags: short lowercase keywords that would help group 
 Give the business model: {BUSINESS_MODEL_GUIDE}.
 List the target markets: the kinds of customers or the regions the company sells to.
 List up to 15 of the main products, services or product lines, each with a one-sentence description and a short category.
-List up to 15 physical sites that the pages name, such as offices, factories or flagship locations. For a chain with hundreds of shops, give only the headquarters and mention the shop network in the summary.
-For each product and each site, set source_page to the web address shown on the PAGE line of the page where you found it.
+List up to 15 physical sites the company operates now that the pages name, such as offices, factories or flagship locations. For a chain with hundreds of shops, give only the headquarters and mention the shop network in the summary. Places that matter only to its history (a first shop, a former factory) belong in the milestones instead.
+{KEY_FACTS_GUIDE}
+{HISTORY_AND_FUNDING_GUIDE}
+For each product, site, milestone, funding round and shareholder, set source_page to the web address shown on the PAGE line of the page where you found it.
 
 Every value you write must describe this particular company and come from its pages. Never copy wording from these instructions into your answer."""
+
+
+class ExtractedMilestone(BaseModel):
+    year: str  # four digits
+    event: str
+    source_page: str
+
+
+class ExtractedFunding(BaseModel):
+    year: str
+    round: str  # seed, Series A, IPO, private placement...
+    amount: str  # as written, e.g. "£500 million"
+    investors: list[str]  # organisations
+    source_page: str
+
+
+class ExtractedShareholder(BaseModel):
+    name: str  # an organisation
+    stake: str  # as written, e.g. "about 25%", or empty
+    source_page: str
 
 
 class ExtractedProduct(BaseModel):
@@ -98,6 +130,11 @@ class ExtractedOffice(BaseModel):
 
 ProductList = Annotated[list[ExtractedProduct], _at_most(MAX_ITEMS), Field(max_length=MAX_ITEMS)]
 OfficeList = Annotated[list[ExtractedOffice], _at_most(MAX_ITEMS), Field(max_length=MAX_ITEMS)]
+MilestoneList = Annotated[list[ExtractedMilestone], _at_most(MAX_MILESTONES),
+                          Field(max_length=MAX_MILESTONES)]
+FundingList = Annotated[list[ExtractedFunding], _at_most(MAX_FUNDING), Field(max_length=MAX_FUNDING)]
+ShareholderList = Annotated[list[ExtractedShareholder], _at_most(MAX_SHAREHOLDERS),
+                            Field(max_length=MAX_SHAREHOLDERS)]
 
 
 class WebsiteExtraction(BaseModel):
@@ -108,6 +145,10 @@ class WebsiteExtraction(BaseModel):
     target_markets: MarketList
     products: ProductList
     offices: OfficeList
+    key_facts: Annotated[list[str], _at_most(20), Field(max_length=20)]
+    milestones: MilestoneList
+    funding_rounds: FundingList
+    shareholders: ShareholderList
 
 
 # --- staged extraction: notes per part, then one merge ------------------------
@@ -120,14 +161,15 @@ STAGE_SYSTEM_PROMPT = """You read one part of the material gathered about a comp
 
 Work only from the text you are given. Don't add facts from general knowledge. If this part says nothing useful about the company, return empty lists.
 
-Record facts about the company, never about people: leave out the names and details of individual employees, directors and private customers.
+Record facts about the company, never about people: leave out the names and details of individual employees, directors, founders and private customers. Don't name any individual person in any value; write "the founders" or "the chief executive" instead.
 
 What to record:
-Key facts: up to 12 short, self-contained sentences about what the company does, who it sells to, where it operates, how big it is, its history, its partners and its notable achievements. Each sentence names the company instead of saying "they".
+""" + KEY_FACTS_GUIDE + """
 Products: up to 15 of the products, services or product lines this part mentions, each with a one-sentence description and a short category.
-Sites: up to 15 physical sites this part names, such as offices, factories or flagship locations.
+Sites: up to 15 physical sites the company operates now that this part names, such as offices, factories or flagship locations. Places that matter only to its history belong in the milestones instead.
 Target markets: the kinds of customers or the regions the company sells to.
-For each product and each site, set source_page to the web address shown on the PAGE line of the page where you found it.
+""" + HISTORY_AND_FUNDING_GUIDE + """
+For each product, site, milestone, funding round and shareholder, set source_page to the web address shown on the PAGE line of the page where you found it.
 
 Every value you write must describe this particular company and come from this text. Never copy wording from these instructions into your answer."""
 
@@ -137,6 +179,9 @@ class ChunkFindings(BaseModel):
     products: ProductList
     offices: OfficeList
     target_markets: MarketList
+    milestones: MilestoneList
+    funding_rounds: FundingList
+    shareholders: ShareholderList
 
 
 MERGE_SYSTEM_PROMPT = f"""You combine research notes about a company into a short profile for a personal research database. You reply with JSON only.

@@ -18,7 +18,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-SCHEMA_VERSION = "0.7.0"
+SCHEMA_VERSION = "0.9.0"
 
 SourceName = Literal[
     "companies_house",
@@ -332,6 +332,68 @@ class StructuredData(BaseModel):
     schema_types: list[str] = Field(default_factory=list)  # e.g. Organization, Bakery
 
 
+class Wikipedia(Sourced):
+    """The company's Wikipedia article and Wikidata facts (organisation facts only;
+    founders and other people listed there are not read)."""
+
+    title: str | None = None
+    url: str | None = None
+    wikidata_id: str | None = None
+    matched_by: Literal["company_number", "search"] | None = None  # how the entry was found
+    description: str | None = None  # short description, e.g. "bakery chain in the United Kingdom"
+    summary: str | None = None  # the article's lead section
+    founded: str | None = None  # year
+    employees: int | None = None
+    employees_as_of: str | None = None  # year of the employee figure
+    industries: list[str] = Field(default_factory=list)
+    headquarters: str | None = None
+    parent_organisation: str | None = None
+    stock_listings: list[str] = Field(default_factory=list)  # e.g. "London Stock Exchange: GRG"
+    official_websites: list[str] = Field(default_factory=list)
+    types: list[str] = Field(default_factory=list)  # e.g. "public company", "bakery"
+    references: list[Reference] = Field(default_factory=list)  # the article's cited sources
+    notes: list[str] = Field(default_factory=list)
+
+
+class Reference(BaseModel):
+    """One source cited by the Wikipedia article: something to read further."""
+
+    text: str  # the citation as shown, e.g. '"Greggs to open 150 shops". BBC News. 3 March 2024.'
+    url: str | None = None  # the cited page, if it's online
+    title: str | None = None  # the linked title, when there is one
+
+
+class Milestone(Sourced):
+    """A dated event in the company's history (LLM, checked against the source text)."""
+
+    year: str
+    event: str
+
+
+class FundingRound(Sourced):
+    year: str | None = None
+    round: str | None = None  # seed, Series A, IPO, private placement...
+    amount: str | None = None  # as written in the source, e.g. "£500 million"
+    investors: list[str] = Field(default_factory=list)  # organisations
+
+
+class Shareholder(Sourced):
+    """An organisation reported to own shares (funds, companies, governments).
+    Individual people are not recorded; registered controllers are in `ownership`."""
+
+    name: str
+    stake: str | None = None  # as written, e.g. "25%"
+
+
+class Funding(BaseModel):
+    rounds: list[FundingRound] = Field(default_factory=list)  # oldest first
+    shareholders: list[Shareholder] = Field(default_factory=list)
+
+
+class KeyFact(Sourced):
+    text: str
+
+
 class Website(Sourced):
     url: str | None = None
     structured: StructuredData = Field(default_factory=StructuredData)
@@ -416,10 +478,14 @@ class CompanyProfile(BaseModel):
     ownership: Ownership = Field(default_factory=Ownership)
     related_companies: RelatedCompanies = Field(default_factory=RelatedCompanies)
     risk: Risk = Field(default_factory=Risk)
+    wikipedia: Wikipedia = Field(default_factory=Wikipedia)
     website: Website = Field(default_factory=Website)
     products: list[Product] = Field(default_factory=list)
     tech_stack: list[str] = Field(default_factory=list)
     news: News = Field(default_factory=News)
+    history: list[Milestone] = Field(default_factory=list)  # oldest first
+    key_facts: list[KeyFact] = Field(default_factory=list)
+    funding: Funding = Field(default_factory=Funding)
     hiring: Hiring = Field(default_factory=Hiring)
 
     def to_json(self) -> str:

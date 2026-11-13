@@ -103,7 +103,7 @@ All of this is exact registry data: no LLM, no scraping, about 4 seconds per com
    - An answer that copies the instructions is discarded.
    `--llm-strategy` controls how the text is sent:
    - `single`: everything in one call.
-   - `staged`: the text is read in parts (about 7,000 characters each, up to 3 parts),
+   - `staged`: the text is read in parts (about 9,000 characters each, up to 5 parts),
      each part yields notes, and a final call merges the notes into the profile. Local
      models are slow with long inputs, so this lets them finish large sites. A failed
      part is skipped, and each call has its own 20-minute limit. Every page still gets
@@ -113,6 +113,42 @@ All of this is exact registry data: no LLM, no scraping, about 4 seconds per com
      (about 12,000 characters), otherwise staged.
 
 Anything skipped or uncertain is recorded in `website.notes`.
+
+## Wikipedia and Wikidata
+
+Runs when `INFORMANT_CONTACT` is set (Wikimedia requires contact details in the
+User-Agent; the value is sent to Wikimedia only). `--no-wikipedia` skips it.
+
+- **Finding the entry**: Wikidata records Companies House numbers for many companies, so
+  the lookup tries the exact number first. Otherwise it searches Wikipedia by name and
+  accepts a result only if it is a UK entity with a matching name and no different
+  company number.
+- **Facts** (`wikipedia`): short description, the article's lead, founding year,
+  industries, headquarters, parent organisation, stock listings with tickers, employee
+  count, official websites. Founders and other people are not read.
+- The whole article (history, operations, products, fundraising...) is handed to the LLM
+  with the website's pages, minus sections about people (leadership, boards, lists of
+  chairmen), which aren't recorded. If the company has no website, or you pass
+  `--no-web`, the LLM still runs on the article. Wikidata's industries are added to the
+  tags. Without an LLM, the description comes from the article's first sentences.
+- **References** (`wikipedia.references`): every source the article cites, with the
+  citation text and link, for further reading.
+
+## History, funding and key facts
+
+The LLM also records, from any source (website pages or Wikipedia):
+
+- `history`: dated milestones (founding, launches, new markets, acquisitions, listings,
+  rebrands, closures, legal events), oldest first.
+- `funding.rounds`: funding rounds with year, kind (seed, Series A, IPO...), amount as
+  written, and the investing organisations.
+- `funding.shareholders`: organisations reported to hold shares, with the stake if given.
+  Individual people aren't recorded; officially registered controllers are in `ownership`.
+- `key_facts`: short, self-contained statements about the company.
+
+Every entry is checked against the source text: a milestone's year and most of its words
+must appear there, investors and shareholders must be named there, and duplicates are
+merged. Each entry records the page it came from.
 
 ## News
 
@@ -182,7 +218,11 @@ always present (empty when not yet populated), and every section carries
 | risk             | computed from the above| done    |
 | website          | company website        | done    |
 | products         | website + LLM          | done    |
+| history          | website/Wikipedia + LLM| done    |
+| funding          | website/Wikipedia + LLM| done    |
+| key_facts        | website/Wikipedia + LLM| done    |
 | tech_stack       | website                | done    |
+| wikipedia        | Wikipedia + Wikidata   | done    |
 | news             | Bing, GDELT, Guardian  | done    |
 | hiring           | careers page / ATS     | planned |
 
@@ -224,7 +264,7 @@ informant --env-file C:/path/informant.env lookup ...   # use a different settin
 
 **Progress.** With `--progress`, each step writes one JSON line to stderr:
 `{"event": "progress", "stage": "crawl", "status": "done", "message": "5 pages read", "data": {...}, "ts": "..."}`.
-Stages, in order: `resolve`, `companies_house`, `registry_details`,
+Stages, in order: `resolve`, `companies_house`, `registry_details`, `wikipedia`,
 `website_discovery`, `crawl`, `extract`, `llm`, `news`, `save`. Status is `started`, `done`,
 `skipped` or `failed`. `registry_details` also sends `progress` events naming each
 step ("Reading filed accounts", "Tracing ownership"...).

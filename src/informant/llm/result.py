@@ -50,7 +50,36 @@ def clean(data: WebsiteExtraction) -> WebsiteExtraction:
     data.tags = sorted({t.replace("_", " ").strip().lower() for t in data.tags if t.strip()})
     data.target_markets = list(dict.fromkeys(
         m.replace("_", " ").strip() for m in data.target_markets if m.strip()))
+    data.business_model = reconcile_business_model(data)
     return data
+
+
+_CONSUMER_WORDS = re.compile(
+    r"\b(consumers?|individuals?|residents?|households?|famil(y|ies)|people|personal|"
+    r"members of the public|the public|shoppers?|students?|teenagers?|children|travell?ers?|"
+    r"homeowners?|retail customers?)\b", re.I)
+_BUSINESS_WORDS = re.compile(
+    r"\b(business(es)?|companies|firms?|enterprises?|smes?|sole traders?|organisations?|"
+    r"organizations?|corporates?|institutions?|traders|merchants|retailers|wholesalers?)\b", re.I)
+
+
+def reconcile_business_model(data: WebsiteExtraction) -> str:
+    """Cross-check the business model against who the answer itself says the customers
+    are. Small models often pick B2B (or B2B2C) for consumer brands; if the summary and
+    target markets name consumers, that wins."""
+    model = data.business_model
+    if model in ("marketplace", "public sector"):
+        return model
+    text = " ".join([data.summary, *data.target_markets])
+    consumers = bool(_CONSUMER_WORDS.search(text))
+    businesses = bool(_BUSINESS_WORDS.search(text))
+    if consumers and businesses and model in ("B2B", "B2C", "B2B2C", "unknown"):
+        return "mixed"
+    if consumers and not businesses and model in ("B2B", "B2B2C", "unknown"):
+        return "B2C"
+    if businesses and not consumers and model == "unknown":
+        return "B2B"
+    return model
 
 
 # --- grounding: is each item actually supported by the text the model was given? ---
@@ -94,7 +123,8 @@ class Grounding:
 
 
 MIN_TAGS = 3  # fewer than this after checking: top up from the text itself
-_ACRONYM = re.compile(r"\b[A-Z]{2,6}\b")
+# Three letters or more: two-letter capitals are mostly initials and customer names ("BP").
+_ACRONYM = re.compile(r"\b[A-Z]{3,6}\b")
 _ALPHA = re.compile(r"[a-z]+")
 _URL = re.compile(r"(?:https?://|www[.])[^ ]+")
 _COMMON_ACRONYMS = {"UK", "US", "USA", "EU", "FAQ", "FAQS", "CEO", "CFO", "CTO", "PDF", "GDPR",
@@ -195,7 +225,102 @@ def ground(data: WebsiteExtraction, source_text: str, notes: list[str],
         gone = [o.label or o.locality for o in data.offices if o not in kept_offices]
         notes.append("dropped site(s) not found in the page text: " + ", ".join(gone))
     data.offices = merge_duplicate_offices(kept_offices)
+    ground_history_and_funding(data, g, notes)
     return data
+
+
+_YEAR = re.compile(r"\b(1[6-9]\d\d|20\d\d)\b")
+_UNKNOWN = {"", "unknown", "n a", "na", "none", "not stated", "not given", "unspecified", "undisclosed"}
+
+
+def _year_of(value: str) -> str | None:
+    m = _YEAR.search(value or "")
+    return m.group(1) if m else None
+
+
+def tidy_history_and_funding(data: WebsiteExtraction) -> WebsiteExtraction:
+    """Normalise years, drop echoed and empty entries, de-duplicate, sort by year.
+    Safe to run on any answer (no source text needed)."""
+    milestones, seen = [], set()
+    for m in data.milestones:
+        year = _year_of(m.year) or _year_of(m.event)
+        in_event = _YEAR.findall(m.event or "")
+        if in_event and year not in in_event:
+            year = max(in_event)  # the event names its own year; trust that over the field
+        event = " ".join(m.event.split())
+        key = (year, _norm(event)[:60])
+        if not year or not event or echoed(event) or key in seen:
+            continue
+        seen.add(key)
+        m.year, m.event = year, event
+        milestones.append(m)
+    data.milestones = sorted(milestones, key=lambda m: m.year)
+
+    rounds, seen_rounds = [], set()
+    for r in data.funding_rounds:
+        r.year = _year_of(r.year) or ""
+        r.investors = list(dict.fromkeys(i.strip() for i in r.investors
+                                         if i.strip() and not echoed(i)))
+        key = (r.year, _norm(r.amount), tuple(sorted(_norm(i) for i in r.investors)))
+        if not (r.amount.strip() or r.investors) or echoed(r.round) or key in seen_rounds:
+            continue
+        seen_rounds.add(key)
+        rounds.append(r)
+    data.funding_rounds = sorted(rounds, key=lambda r: r.year or "9999")
+
+    holders: dict[str, object] = {}
+    for s in data.shareholders:
+        if s.name.strip() and not echoed(s.name):
+            if _norm(s.stake) in _UNKNOWN:
+                s.stake = ""
+            holders.setdefault(_norm(s.name), s)
+    data.shareholders = list(holders.values())
+    for r in data.funding_rounds:
+        if _norm(r.amount) in _UNKNOWN:
+            r.amount = ""
+        if _norm(r.round) in _UNKNOWN:
+            r.round = ""
+
+    data.key_facts = list(dict.fromkeys(
+        " ".join(f.split()) for f in data.key_facts if f.strip() and not echoed(f)))
+    return data
+
+
+def ground_history_and_funding(data: WebsiteExtraction, g: Grounding, notes: list[str]) -> None:
+    """Milestones need their year in the text and most of their words; investors and
+    shareholders must be named in the text; key facts must be mostly supported."""
+    tidy_history_and_funding(data)
+
+    kept = [m for m in data.milestones if g.has(m.year) and g.share(m.event) >= 0.6]
+    if len(kept) < len(data.milestones):
+        notes.append(f"dropped {len(data.milestones) - len(kept)} milestone(s) not supported "
+                     "by the source text")
+    data.milestones = kept
+
+    dropped_investors = 0
+    rounds = []
+    for r in data.funding_rounds:
+        investors = [i for i in r.investors if g.share(i) >= 0.5]
+        dropped_investors += len(r.investors) - len(investors)
+        r.investors = investors
+        if (r.year and not g.has(r.year)) or not (r.amount.strip() or r.investors):
+            continue
+        rounds.append(r)
+    if dropped_investors or len(rounds) < len(data.funding_rounds):
+        notes.append("dropped funding details not found in the source text")
+    data.funding_rounds = rounds
+
+    holders = [s for s in data.shareholders if g.share(s.name) >= 0.5]
+    if len(holders) < len(data.shareholders):
+        gone = [s.name for s in data.shareholders if s not in holders]
+        notes.append("dropped shareholder(s) not named in the source text: " + ", ".join(gone))
+    data.shareholders = holders
+
+    facts = [f for f in data.key_facts if g.share(f) >= 0.6]
+    if len(facts) < len(data.key_facts):
+        notes.append(f"dropped {len(data.key_facts) - len(facts)} key fact(s) not supported "
+                     "by the source text")
+    data.key_facts = facts
 
 
 def finish(data: WebsiteExtraction, model: str | None, notes: list[str],
@@ -209,4 +334,6 @@ def finish(data: WebsiteExtraction, model: str | None, notes: list[str],
     data = clean(data)
     if source_text:
         data = ground(data, source_text, notes, company_name)
+    else:
+        data = tidy_history_and_funding(data)
     return ExtractionResult(data, model=model, notes=notes)

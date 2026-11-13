@@ -154,6 +154,7 @@ LLM_OUTPUT = {
     ],
     "offices": [{"label": "Head office", "address": "1 High St", "locality": "London",
                  "country": "United Kingdom", "source_page": "https://acme.example/contact"}],
+    "key_facts": [], "milestones": [], "funding_rounds": [], "shareholders": [],
 }
 
 

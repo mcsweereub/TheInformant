@@ -29,8 +29,10 @@ from .sources.companies_house.details import STAGE as REGISTRY_STAGE
 from .sources.companies_house.details import add_registry_details, add_risk_flags
 from .sources.news import DEFAULT_DAYS as DEFAULT_NEWS_DAYS
 from .sources.news import fetch_news
+from .sources.website.research import summary_sentences
+from .sources.wikipedia import fetch_wikipedia
 from .sources.website.fetch import Crawler
-from .sources.website.research import research_website
+from .sources.website.research import extract_from_material, research_website
 
 REGISTRY_DEPTHS = ("full", "basic")
 _OFF = {"0", "off", "false", "no"}
@@ -75,6 +77,7 @@ def research_company(
     refresh: bool = False,
     registry: str | None = None,
     news: bool | None = None,
+    wikipedia: bool | None = None,
     news_days: int | None = None,
     progress: ProgressFn | None = None,
     ch_client: CompaniesHouseClient | None = None,
@@ -125,6 +128,15 @@ def research_company(
         if own_ch:
             ch.close()
 
+    if wikipedia is None:
+        wikipedia = os.environ.get("INFORMANT_WIKIPEDIA", "on").strip().lower() not in _OFF
+    wiki_material = None
+    if wikipedia:
+        wiki_material = research_wikipedia(
+            profile, cache=PageCache(refresh=refresh) if caching else None, progress=progress)
+    else:
+        emit(progress, "wikipedia", "skipped", "Wikipedia disabled")
+
     if web:
         own_crawler = crawler is None
         crawler = crawler or Crawler(
@@ -133,13 +145,23 @@ def research_company(
             research_website(profile, crawler=crawler, user_url=website,
                              max_pages=max_pages, use_llm=llm, llm_strategy=llm_strategy,
                              llm_cache=LlmCache() if caching else None,
-                             progress=progress)
+                             progress=progress,
+                             extra_material=[wiki_material] if wiki_material else None)
         finally:
             if own_crawler:
                 crawler.close()
     else:
-        for stage in ("website_discovery", "crawl", "extract", "llm"):
+        for stage in ("website_discovery", "crawl", "extract"):
             emit(progress, stage, "skipped", "Website research disabled")
+        if llm and wiki_material is not None:
+            # No website, but the Wikipedia article is still worth reading.
+            extract_from_material(profile, [wiki_material], llm_strategy=llm_strategy,
+                                  llm_cache=LlmCache() if caching else None, progress=progress)
+        else:
+            emit(progress, "llm", "skipped",
+                 "Website research disabled" if llm else "LLM disabled")
+        if not profile.identity.description:
+            profile.identity.description = summary_sentences(profile.wikipedia.summary)
 
     if news is None:
         news = os.environ.get("INFORMANT_NEWS", "on").strip().lower() not in _OFF
@@ -154,6 +176,28 @@ def research_company(
         emit(progress, "news", "skipped", "News search disabled")
 
     return LookupResult(profile=profile, matched_by=matched_by, alternatives=alternatives)
+
+
+def research_wikipedia(profile: CompanyProfile, *, cache: PageCache | None = None,
+                       progress: ProgressFn | None = None):
+    """Fill profile.wikipedia and return the article as LLM material (or None).
+    Wikidata's industries are added to the tags: they're curated facts."""
+    ident = profile.identity
+    emit(progress, "wikipedia", "started", "Looking up Wikipedia and Wikidata")
+    result = fetch_wikipedia(ident.name, ident.company_number, cache=cache)
+    profile.wikipedia = result.section
+    industries = [i.lower() for i in result.section.industries if i]
+    if industries:
+        cls = profile.classification
+        cls.tags = sorted(set(cls.tags) | set(industries))
+        cls.sources.extend(result.section.sources[:1])
+    if result.section.title or result.section.wikidata_id:
+        emit(progress, "wikipedia", "done", result.section.title or result.section.wikidata_id,
+             matched_by=result.section.matched_by, url=result.section.url)
+    else:
+        emit(progress, "wikipedia", "skipped",
+             result.section.notes[-1] if result.section.notes else "Not found")
+    return result.material
 
 
 def research_news(profile: CompanyProfile, *, days: int = DEFAULT_NEWS_DAYS, limit: int = 20,
