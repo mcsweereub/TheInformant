@@ -15,6 +15,10 @@ from dataclasses import dataclass, field
 
 from .cache import AccountsCache, LlmCache, PageCache, cache_enabled
 from .errors import ConfigError, NotFoundError
+from .llm import judge_headlines, make_complete
+from .llm.news import SENTIMENT_SCORES
+from .progress import ProgressFn, emit
+from .schema import CompanyProfile, News, NewsItem, Source
 from .sources.companies_house import (
     CompaniesHouseClient,
     SearchHit,
@@ -23,13 +27,13 @@ from .sources.companies_house import (
 )
 from .sources.companies_house.details import STAGE as REGISTRY_STAGE
 from .sources.companies_house.details import add_registry_details, add_risk_flags
+from .sources.news import DEFAULT_DAYS as DEFAULT_NEWS_DAYS
+from .sources.news import fetch_news
 from .sources.website.fetch import Crawler
-from .progress import ProgressFn, emit
-from .schema import CompanyProfile
 from .sources.website.research import research_website
 
-
 REGISTRY_DEPTHS = ("full", "basic")
+_OFF = {"0", "off", "false", "no"}
 
 
 @dataclass
@@ -70,12 +74,16 @@ def research_company(
     use_cache: bool = True,
     refresh: bool = False,
     registry: str | None = None,
+    news: bool | None = None,
+    news_days: int | None = None,
     progress: ProgressFn | None = None,
     ch_client: CompaniesHouseClient | None = None,
     crawler: Crawler | None = None,
 ) -> LookupResult:
     """Build a CompanyProfile for a company name or number (does not save it).
 
+    news: search recent news (default: INFORMANT_NEWS, on); news_days: how far back
+    (default: INFORMANT_NEWS_DAYS or 90).
     registry: "full" (also read filed accounts, share capital, charges, ownership
     and related companies) or "basic"; defaults to INFORMANT_REGISTRY or "full".
     browser: "auto" (headless browser only for JavaScript-built pages), "always" or
@@ -133,4 +141,60 @@ def research_company(
         for stage in ("website_discovery", "crawl", "extract", "llm"):
             emit(progress, stage, "skipped", "Website research disabled")
 
+    if news is None:
+        news = os.environ.get("INFORMANT_NEWS", "on").strip().lower() not in _OFF
+    if news:
+        research_news(profile,
+                      days=news_days or int(os.environ.get("INFORMANT_NEWS_DAYS", DEFAULT_NEWS_DAYS)),
+                      use_llm=llm,
+                      page_cache=PageCache(refresh=refresh) if caching else None,
+                      llm_cache=LlmCache() if caching else None,
+                      progress=progress)
+    else:
+        emit(progress, "news", "skipped", "News search disabled")
+
     return LookupResult(profile=profile, matched_by=matched_by, alternatives=alternatives)
+
+
+def research_news(profile: CompanyProfile, *, days: int = DEFAULT_NEWS_DAYS, limit: int = 20,
+                  use_llm: bool = True, page_cache: PageCache | None = None,
+                  llm_cache: LlmCache | None = None, progress: ProgressFn | None = None) -> None:
+    """Fill profile.news: recent headlines naming the company, each judged by the
+    LLM (if enabled) for relevance, tone and topic. Never raises for a provider or
+    model failure: those become notes."""
+    ident = profile.identity
+    emit(progress, "news", "started", "Searching recent news")
+    with Crawler(cache=page_cache) as robots:  # only used for its robots.txt check
+        found = fetch_news(ident.name, ident.website, days=days, limit=limit,
+                           cache=page_cache, allowed=robots.allowed)
+    section = News(searched_for=found.names, window_days=days, providers=found.providers,
+                   notes=list(found.notes), sources=[Source(name="news")])
+
+    judged = {}
+    if use_llm and found.articles:
+        emit(progress, "news", "progress", f"Judging {len(found.articles)} headlines",
+             headlines=len(found.articles))
+        complete, _ = make_complete(cache=llm_cache)
+        judged, notes = judge_headlines(ident.name, ident.description,
+                                        [a.title for a in found.articles], complete)
+        section.notes.extend(notes)
+
+    doubtful = 0
+    for i, article in enumerate(found.articles):
+        verdict = judged.get(i)
+        if verdict is not None and not verdict.about_company:
+            doubtful += 1
+        section.items.append(NewsItem(
+            title=article.title, url=article.url, published_at=article.published_at,
+            publisher=article.publisher, summary=article.summary,
+            sentiment=SENTIMENT_SCORES[verdict.sentiment] if verdict else None,
+            topic=verdict.topic if verdict else None,
+            provider=article.provider, relevant=verdict.about_company if verdict else None,
+            sources=[Source(name="news", url=article.url)]))
+    if doubtful:
+        section.notes.append(f"{doubtful} headline(s) marked relevant=false: the model judged "
+                             "them not to be about this company (kept, as small models misjudge some)")
+    profile.news = section
+    relevant = sum(1 for n in section.items if n.relevant is not False)
+    emit(progress, "news", "done", f"{relevant} article(s)",
+         articles=len(section.items), relevant=relevant, providers=found.providers)

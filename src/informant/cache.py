@@ -79,7 +79,8 @@ class PageCache:
     def _path(self, url: str) -> Path:
         return self.dir / f"{_hash(url.strip().rstrip('/').lower())}.json.gz"
 
-    def get(self, url: str) -> CachedPage | None:
+    def get(self, url: str, max_age: timedelta | None = None) -> CachedPage | None:
+        """`max_age` overrides the default lifetime (robots.txt is kept for less)."""
         if self.refresh:
             return None
         try:
@@ -92,7 +93,7 @@ class PageCache:
             )
         except (OSError, ValueError, KeyError, EOFError):
             return None  # missing or damaged entry: treat as a miss
-        if utcnow() - page.fetched_at > self.max_age:
+        if utcnow() - page.fetched_at > (max_age if max_age is not None else self.max_age):
             return None
         return page
 

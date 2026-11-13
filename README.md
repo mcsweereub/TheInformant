@@ -79,26 +79,65 @@ All of this is exact registry data: no LLM, no scraping, about 4 seconds per com
 2. **Crawl politely.** Fetches the homepage plus up to 7 key pages: about, products,
    investors, customers (case studies), careers, contact and news. Pages are matched by
    address first, then by short menu labels; legal pages (terms, privacy, cookies,
-   regulatory notices) are skipped. Spare slots go to the homepage's other menu links,
-   so a product page like `/eos/` is still read. It obeys robots.txt, waits 1s
+   regulatory notices) are skipped. Page kinds the homepage doesn't link are looked up in
+   the site's sitemap (`INFORMANT_SITEMAP=off` disables this). Spare slots go to the
+   homepage's other menu links, so a product page like `/eos/` is still read. It obeys
+   robots.txt, waits 1s
    between requests, stays on the same site, and skips anything that blocks it.
    If a page comes back nearly empty because JavaScript builds it (e.g. monzo.com),
    it reloads that page in a headless Chromium browser, and loads the rest of that
    site the same way. Control this with `--browser auto|always|never` (default auto).
 3. **Extract without an LLM.** Role email addresses (info@, sales@...),
-   phone numbers, company social accounts and tech stack.
+   phone numbers, company social accounts and tech stack. Also the facts the site
+   declares about itself in machine-readable form (schema.org JSON-LD and OpenGraph
+   tags): official name, description, logo, founding date, employee range, address.
+   These go into `website.structured`, and are handed to the LLM as a fact sheet.
 4. **Extract with an LLM** (Claude or a local Ollama model). Summary, sectors from a
    fixed list, tags, business model, target markets, products and offices.
+   Every answer is checked before it's kept:
+   - Sectors and business model are fixed lists in the output format itself, so a
+     model can't invent a value.
+   - Tags, products and sites must be supported by the page text; unsupported ones are
+     dropped, with a note saying which. If fewer than three tags survive, the gap is
+     filled with terms the pages themselves repeat.
+   - An answer that copies the instructions is discarded.
    `--llm-strategy` controls how the text is sent:
    - `single`: everything in one call.
-   - `staged`: the text is read in parts (about 9,000 characters each, up to 5 parts),
+   - `staged`: the text is read in parts (about 7,000 characters each, up to 3 parts),
      each part yields notes, and a final call merges the notes into the profile. Local
      models are slow with long inputs, so this lets them finish large sites. A failed
-     part is skipped, and each call has its own 20-minute limit.
+     part is skipped, and each call has its own 20-minute limit. Every page still gets
+     a fair share of the space. `INFORMANT_STAGE_CHARS` and `INFORMANT_MAX_STAGES`
+     change the sizes (more parts read more of a big site, but take longer).
    - `auto` (default): one call for Claude; for Ollama, one call when the text fits
      (about 12,000 characters), otherwise staged.
 
 Anything skipped or uncertain is recorded in `website.notes`.
+
+## News
+
+Recent headlines that name the company (default: the last 90 days, up to 20 articles).
+
+- **Sources**: the Bing News RSS feed and the GDELT news API (both free, no key), plus
+  the Guardian's API if `GUARDIAN_API_KEY` is set (free key from
+  https://open-platform.theguardian.com/). Google News is not used: its robots.txt
+  disallows its feed. GDELT is rate-limited and sometimes unavailable; that's noted, not fatal.
+- **Matching**: the search uses the brand (from the website's domain, or a distinctive
+  first word of the name) and the registered name. A headline is kept only if it names
+  the company; everyday-word brands like "Next" must appear capitalised.
+- **Judging** (if an LLM is enabled): one call rates every headline's tone (`sentiment`:
+  -1, 0 or 1) and topic (deal, results, leadership, legal, expansion or closure...), and
+  whether it is really about the company. Headlines it doubts are kept with
+  `relevant: false` rather than dropped, because small models misjudge some genuine
+  stories (e.g. "Nubank not pursuing Monzo takeover"). Small local models also tend to
+  rate almost everything neutral.
+- Only headline, link, publisher, date and the feed's snippet are kept; article text
+  is never downloaded.
+
+```sh
+uv run informant lookup 00502851 --news-days 30   # a shorter window
+uv run informant lookup 00502851 --no-news        # skip news
+```
 
 ## Cache
 
@@ -144,7 +183,7 @@ always present (empty when not yet populated), and every section carries
 | website          | company website        | done    |
 | products         | website + LLM          | done    |
 | tech_stack       | website                | done    |
-| news             | news API / RSS         | planned |
+| news             | Bing, GDELT, Guardian  | done    |
 | hiring           | careers page / ATS     | planned |
 
 ## Using TheInformant from other programs
@@ -186,7 +225,7 @@ informant --env-file C:/path/informant.env lookup ...   # use a different settin
 **Progress.** With `--progress`, each step writes one JSON line to stderr:
 `{"event": "progress", "stage": "crawl", "status": "done", "message": "5 pages read", "data": {...}, "ts": "..."}`.
 Stages, in order: `resolve`, `companies_house`, `registry_details`,
-`website_discovery`, `crawl`, `extract`, `llm`, `save`. Status is `started`, `done`,
+`website_discovery`, `crawl`, `extract`, `llm`, `news`, `save`. Status is `started`, `done`,
 `skipped` or `failed`. `registry_details` also sends `progress` events naming each
 step ("Reading filed accounts", "Tracing ownership"...).
 During staged extraction, the `llm` stage also sends `progress` events with

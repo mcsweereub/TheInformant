@@ -68,15 +68,40 @@ def _match_score(path: str, text: str, keywords: tuple[str, ...]) -> int | None:
     return None
 
 
-def choose_pages(home: Page, max_extra: int) -> list[tuple[str, str]]:
-    """Pick the best link for each page kind from the homepage's links."""
+def sitemap_candidates(urls: list[str], home_url: str) -> list[tuple[str, str]]:
+    """Sitemap URLs worth considering as key pages: same site, shallow (not individual
+    posts or products), not a translated copy. Returned as (url, "") link pairs."""
+    links = []
+    for url in urls:
+        if not url.startswith("http") or not same_site(url, home_url):
+            continue
+        path = urlparse(url).path or "/"
+        # Top-level pages only: deeper sitemap entries are mostly individual posts,
+        # whose addresses can start with a keyword (/blog/contact-us-in-sign-language).
+        if path_key(url).count("/") > 1 or _LANGUAGE_PREFIX_RE.match(path):
+            continue
+        links.append((url, ""))
+    return links
+
+
+def choose_pages(home: Page, max_extra: int, *, links: list[tuple[str, str]] | None = None,
+                 kinds: list[str] | None = None, taken: set[str] | None = None) -> list[tuple[str, str]]:
+    """Pick the best link for each page kind.
+
+    By default the candidates are the homepage's own links. Pass `links` to choose
+    from another list (e.g. the sitemap), `kinds` to look only for some page kinds,
+    and `taken` (path keys) for pages already chosen.
+    """
     chosen: list[tuple[str, str]] = []
-    seen = {path_key(home.url)}
+    seen = {path_key(home.url)} | set(taken or ())
+    candidates = home.links if links is None else links
     for kind, keywords in PAGE_KINDS.items():
+        if kinds is not None and kind not in kinds:
+            continue
         if len(chosen) >= max_extra:
             break
         best: tuple[int, str] | None = None
-        for href, text in home.links:
+        for href, text in candidates:
             if not href.startswith("http") or not same_site(href, home.url):
                 continue
             path = urlparse(href).path.lower() or "/"

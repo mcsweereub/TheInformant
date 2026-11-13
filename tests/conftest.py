@@ -11,3 +11,9 @@ def no_cache_by_default(monkeypatch):
     # Older tests mock only the core Companies House endpoints; the deeper registry
     # steps (accounts, charges, ownership...) are tested in test_registry_details.py.
     monkeypatch.setenv("INFORMANT_REGISTRY", "basic")
+    # Likewise the sitemap lookup, which adds a request older site mocks don't have;
+    # it is tested in test_structured.py.
+    monkeypatch.setenv("INFORMANT_SITEMAP", "off")
+    # News makes requests to outside feeds; it is tested in test_news.py.
+    monkeypatch.setenv("INFORMANT_NEWS", "off")
+    monkeypatch.delenv("GUARDIAN_API_KEY", raising=False)

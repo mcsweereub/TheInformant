@@ -65,6 +65,9 @@ def index_entry(profile: CompanyProfile, file_name: str) -> dict[str, Any]:
         "sectors": profile.classification.sectors,
         "sic_codes": [s.code for s in profile.classification.sic_codes],
         "llm_model": profile.website.llm_model,
+        "news_count": sum(1 for n in profile.news.items if n.relevant is not False),
+        "latest_news_at": max((n.published_at.isoformat() for n in profile.news.items
+                               if n.published_at), default=None),
         # headline registry figures, so a list view needn't open every profile
         "accounts_period_end": latest.period_end.isoformat() if latest else None,
         "turnover": latest.turnover if latest else None,

@@ -11,6 +11,14 @@ personal research. A separate, future program will visualise/categorise the outp
   their CPU-only laptop; `gemma4:12b` timed out). Claude is opt-in; avoid API spend when testing.
 - When smoke-testing real lookups, write to a scratch file (`--out-file`) so the user's saved
   profiles in `output/` aren't overwritten by `--no-llm` runs.
+- Real-world test companies (the user wants quick tests, not 20+ minute runs):
+  - Planlogic Software (09461711, planlogic.com): the standard end-to-end test, ~3-4 min.
+    Covers iXBRL accounts, WordPress, JSON-LD, a menu-only product page (/eos/), a case-studies
+    page, the /about-us fallback, a mislabelled charset, and qwen's "lpg" tag invention.
+  - Monzo Bank (09446231) with `--no-web`: news (many articles, ~2 min), corporate owner,
+    charges, share allotments. Its full website run is the large JavaScript-site case
+    (headless browser + staged extraction) and is slow; only run it when that path changed.
+  - Greggs (00502851) with `--no-llm` / `--no-web`: PDF-only accounts, PLC deadlines.
 
 ## Layout (src/informant/)
 - `schema.py`: output contract (pydantic). Bump `SCHEMA_VERSION` on breaking changes.
@@ -37,20 +45,41 @@ personal research. A separate, future program will visualise/categorise the outp
   - `website/fetch.py`: `Crawler`: robots.txt, delays, same host; thin script-heavy pages are
     retried in a headless browser (`renderer.py`, Playwright). Discovery probes never render.
   - `website/pages.py`: which pages to read. PAGE_KINDS matched on URL path, then short labels
-    (a label can't overrule a path naming another kind); LEGAL_RE pages skipped; /about
-    fallback; spare slots filled from homepage menu links.
+    (a label can't overrule a path naming another kind); LEGAL_RE pages skipped; kinds the
+    homepage doesn't link are looked up in the sitemap (robots.txt `Sitemap:` or /sitemap.xml;
+    INFORMANT_SITEMAP=off, and off in older tests via conftest); /about fallback; spare slots
+    filled from homepage menu links. robots.txt is cached for 1 day, missing sitemaps too.
+    Page bytes are decoded as UTF-8 when valid (servers often mislabel the charset).
   - `website/parse.py`: Page/CrawlResult types, HTML -> text/links.
   - `website/extract.py`: non-LLM extraction (contacts, socials, tech stack, ownership check).
+  - `website/structured.py`: JSON-LD / OpenGraph facts (organisation-level only, never the
+    people in the markup) -> `website.structured`, contacts, an office location, and a
+    "structured" fact-sheet page placed first in the LLM material.
   - `website/research.py`: website stage (discover -> crawl -> extract -> LLM -> merge).
 - `llm/`: raw text -> structured fields. Public API re-exported from `llm/__init__.py`.
   - `models.py` backend/model choice; `prompts.py` prompt + SECTORS + output schema (shared by
-    all backends); `budget.py` repeated-line removal + fair share per page; `result.py` checks
-    on every answer (echoed-prompt guard); `backends/claude.py` (`beta.messages.parse`) and
+    all backends; sectors and business model are enums in the schema, with tolerant
+    validators that drop unknown values instead of failing); `budget.py` repeated-line removal
+    + fair share per page; `result.py` checks on every answer: echoed-prompt guard, grounding
+    (tags/products/sites must appear in the source text, with simple stemming), duplicate-site
+    merge, and a tag top-up from frequent page terms when fewer than 3 survive (qwen3:4b
+    reliably invents "lpg" tags for an LNG site; prompt wording didn't fix it, the check does);
+    `backends/claude.py` (`beta.messages.parse`) and
     `backends/ollama.py` (`/api/chat` + JSON-schema `format`), both exposing
     `complete(system, user, schema)`; `staged.py` notes-per-part + merge (products/sites are
     combined in code, the merge call only writes summary/sectors/tags); `extract.py` picks
     backend + strategy (`--llm-strategy`: auto = single for Claude, staged for Ollama when the
-    de-duplicated text exceeds ~12k chars).
+    de-duplicated text exceeds ~12k chars); `make_complete()` gives any feature the configured
+    backend + cache. Staged defaults: 3 parts x 7,000 chars (was 5 x 9,000; Monzo took 17-27
+    min that way and later parts added little).
+  - `news.py`: one call judges all headlines (relevance, sentiment, topic) from fixed lists.
+- `sources/news.py`: Bing News RSS (one query per name; the feed ignores OR) + GDELT DOC API
+  (1 request / 5 s, often 429s; best-effort) + Guardian API if GUARDIAN_API_KEY. Google News
+  RSS is disallowed by its robots.txt: don't use it. Headlines must name the company
+  (`mentions`); names = domain brand, registered core name, distinctive first word.
+  `pipeline.research_news()` fills `profile.news`; doubtful headlines are kept with
+  relevant=False (qwen dropped real "Nubank not pursuing Monzo" stories) and hidden in the CLI.
+  qwen3:4b rates nearly all headlines neutral: sentiment from it is weak.
 
 ## Integration
 - TheInformant must stay a standalone console app. A GUI (planned: React + local Python API
@@ -84,14 +113,14 @@ local cache. Measured on the user's laptop (qwen3:4b): ~4-5 min per LLM call; Mo
 Also done: Companies House depth (accounts, capital, charges, ownership, related, risk flags).
 Tests: older tests run with INFORMANT_REGISTRY=basic (conftest); full depth is tested in
 `tests/test_registry_details.py`.
+Also done: answer checks (schema enums, grounding, output cap `num_predict`), structured data
+(JSON-LD/OpenGraph), sitemap page discovery, news (Bing + GDELT + optional Guardian).
 
 Agreed next, in this order (the user liked all of these):
-1. Structured data before the LLM (JSON-LD/OpenGraph, sitemap.xml); answer checks (enum
-   sectors/business model in the schema, grounding check that products/tags appear in the
-   text, output cap `num_predict`).
-2. Sources, one at a time: news (Google News RSS + optional Guardian key), Wikipedia (official
-   API, needs INFORMANT_CONTACT), web search (official API with free tier, e.g. Brave).
-   New sources feed the staged pipeline as extra material; no separate LLM plumbing.
+2. Sources, one at a time: Wikipedia (official API, needs INFORMANT_CONTACT), then web search
+   (official API with free tier, e.g. Brave). New sources feed the staged pipeline as extra
+   material; no separate LLM plumbing. Tag quality: prefer tags from structured data /
+   frequent terms over the small model's free choice (it invents "lpg" for LNG).
 3. Customers: extract named client companies into the profile; resolve UK ones to Companies
    House numbers; optional `--with-customers` deep dive; customer links in the index.
 4. More legal public data the user approved: Companies House bulk downloads (offline

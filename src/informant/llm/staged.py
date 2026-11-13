@@ -9,7 +9,7 @@ Each call has its own time limit, so a slow model can still finish a large
 site. A failed part is skipped; a failed merge falls back to a summary built
 from the notes, so finished work is never thrown away.
 
-INFORMANT_STAGE_CHARS (default 9000) and INFORMANT_MAX_STAGES (default 5) tune
+INFORMANT_STAGE_CHARS (default 7000) and INFORMANT_MAX_STAGES (default 3) tune
 the part size and the maximum number of parts.
 """
 
@@ -33,8 +33,11 @@ from .prompts import (
 )
 from .result import ExtractionResult, echoed, finish
 
-DEFAULT_STAGE_CHARS = 9_000
-DEFAULT_MAX_STAGES = 5
+# Measured on a CPU-only laptop (qwen3:4b): a 9,000-character part takes 4-5 minutes, and
+# parts beyond the third added little (later pages repeat the story). 3 x 7,000 keeps a
+# large site to roughly 10-12 minutes; every page still gets a fair share of the total.
+DEFAULT_STAGE_CHARS = 7_000
+DEFAULT_MAX_STAGES = 3
 HEADER_ALLOWANCE = 300  # room for the "=== PAGE ..." header on each piece
 MAX_FACTS = 40
 MAX_ITEMS = 15
@@ -220,6 +223,6 @@ def extract_staged(company_name: str, pages: list, complete: CompleteFn,
         products=products,
         offices=offices,
     )
-    result = finish(data, model, notes)
+    result = finish(data, model, notes, source_text="\n".join(chunks), company_name=company_name)
     result.strategy = "staged"
     return result

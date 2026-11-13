@@ -78,6 +78,22 @@ def extract_social_links(pages: list[Page]) -> dict[str, str]:
     return found
 
 
+def merge_structured_contacts(emails: list[str], phones: list[str], social: dict[str, str],
+                              *, raw_emails: list[str], raw_phones: list[str],
+                              same_as: list[str]) -> tuple[list[str], list[str], dict[str, str]]:
+    """Add contact details a site declares in its structured data, under the same
+    rules as scraped ones: role addresses only, company social accounts only."""
+    emails = sorted(set(emails) | {e for raw in raw_emails if (e := _clean_email(raw))})
+    for raw in raw_phones:
+        if (p := _clean_phone(raw)) and p not in phones:
+            phones.append(p)
+    for url in same_as:
+        for name, pattern in SOCIAL_PATTERNS.items():
+            if name not in social and (m := pattern.match(url)):
+                social[name] = m.group(0).rstrip("/")
+    return emails, phones[:10], social
+
+
 # --- tech stack -----------------------------------------------------------
 
 # (name, where, regex) - where is "html" or a response header name.

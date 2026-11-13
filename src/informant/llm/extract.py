@@ -49,15 +49,12 @@ def _model_id(backend: str) -> str:
     return ollama.model_label()
 
 
-def extract_with_llm(company_name: str, pages: list,
-                     client: anthropic.Anthropic | None = None, *,
-                     strategy: str | None = None,
-                     progress: ProgressFn | None = None,
-                     cache=None) -> ExtractionResult:
-    """Run whichever backend is configured. Passing an Anthropic client forces Claude."""
+def make_complete(client: anthropic.Anthropic | None = None,
+                  cache=None) -> tuple[CompleteFn, str]:
+    """The configured backend as a `complete(system, user, schema)` function, cached
+    if a cache is given. Returns (complete, backend name). Use this for any LLM
+    call, so every feature shares the same model choice and cache."""
     backend = "claude" if client is not None or choose_backend() == "claude" else "ollama"
-    chosen = choose_strategy(backend, pages, strategy)
-
     complete: CompleteFn
     if backend == "claude":
         def complete(system, user, schema):
@@ -66,6 +63,17 @@ def extract_with_llm(company_name: str, pages: list,
         complete = ollama.complete
     if cache is not None:
         complete = with_cache(complete, cache, _model_id(backend))
+    return complete, backend
+
+
+def extract_with_llm(company_name: str, pages: list,
+                     client: anthropic.Anthropic | None = None, *,
+                     strategy: str | None = None,
+                     progress: ProgressFn | None = None,
+                     cache=None) -> ExtractionResult:
+    """Run whichever backend is configured. Passing an Anthropic client forces Claude."""
+    complete, backend = make_complete(client, cache)
+    chosen = choose_strategy(backend, pages, strategy)
 
     if chosen == "single":
         limit = TOTAL_CHAR_LIMIT if backend == "claude" else OLLAMA_TOTAL_CHAR_LIMIT
