@@ -16,6 +16,9 @@ from ..single import extract_single
 from .base import Completion
 
 DEFAULT_OLLAMA_NUM_CTX = 16384  # tokens; Ollama's own default is too small for web pages
+# Most answers need well under 2,000 tokens. The cap stops a model that starts repeating
+# itself from running for many minutes (OLLAMA_NUM_PREDICT overrides it).
+DEFAULT_OLLAMA_NUM_PREDICT = 4096
 OLLAMA_TIMEOUT_S = 1200.0  # 20 min per call: local models on a CPU are slow with long input
 
 
@@ -29,6 +32,7 @@ def complete(system: str, user: str, schema: type[BaseModel],
     model = os.environ.get("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
     host = ollama_host()
     num_ctx = int(os.environ.get("OLLAMA_NUM_CTX", DEFAULT_OLLAMA_NUM_CTX))
+    num_predict = int(os.environ.get("OLLAMA_NUM_PREDICT", DEFAULT_OLLAMA_NUM_PREDICT))
     label = f"ollama/{model}"
 
     own_client = http is None
@@ -38,7 +42,7 @@ def complete(system: str, user: str, schema: type[BaseModel],
         "model": model,
         "stream": False,
         "format": schema.model_json_schema(),  # constrains output to the schema
-        "options": {"temperature": 0, "num_ctx": num_ctx},
+        "options": {"temperature": 0, "num_ctx": num_ctx, "num_predict": num_predict},
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -72,7 +76,9 @@ def complete(system: str, user: str, schema: type[BaseModel],
             f"Ollama request failed ({resp.status_code}): {resp.text[:200]}"], elapsed)
     body = resp.json()
     if body.get("done_reason") == "length":
-        return Completion(None, label, [f"{label} ran out of context; raise OLLAMA_NUM_CTX"], elapsed)
+        return Completion(None, label, [
+            f"{label} hit its output or context limit before finishing "
+            "(raise OLLAMA_NUM_PREDICT or OLLAMA_NUM_CTX)"], elapsed)
     try:
         data = schema.model_validate_json(body.get("message", {}).get("content", ""))
     except ValidationError:

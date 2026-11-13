@@ -26,7 +26,7 @@ def filler(label: str, chars: int) -> str:
     """Distinct lines (so repeated-line removal keeps them), about `chars` long."""
     lines, size, i = [], 0, 0
     while size < chars:
-        line = f"{label} fact number {i}: Acme does something specific here."
+        line = f"{label} fact number {i}: Acme makes industrial widgets like Widget Pro in London."
         lines.append(line)
         size += len(line) + 1
         i += 1

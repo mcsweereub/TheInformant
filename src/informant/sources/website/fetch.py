@@ -10,8 +10,11 @@ Deliberately conservative:
 
 from __future__ import annotations
 
+import html
 import os
+import re
 import time
+from datetime import timedelta
 from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
@@ -19,12 +22,39 @@ import httpx
 
 from ...cache import PageCache
 from ...schema import utcnow
-from .pages import FALLBACK_PATHS, NOT_FOUND_RE, choose_pages, menu_links
+from .pages import (
+    FALLBACK_PATHS,
+    NOT_FOUND_RE,
+    PAGE_KINDS,
+    choose_pages,
+    menu_links,
+    sitemap_candidates,
+)
 from .parse import CrawlResult, Page, looks_js_rendered, normalise_url, parse_page, path_key
 from .renderer import BrowserUnavailable, PlaywrightRenderer, Renderer
 
 USER_AGENT = "Mozilla/5.0 (compatible; informant/0.1; personal company research)"
 MAX_BYTES = 3_000_000
+ROBOTS_MAX_AGE = timedelta(days=1)
+MAX_SITEMAP_FILES = 3
+MAX_SITEMAP_URLS = 3_000
+_OFF = {"0", "off", "false", "no"}
+_LOC_RE = re.compile(r"<loc>\s*(?:<!\[CDATA\[)?\s*(.*?)\s*(?:\]\]>)?\s*</loc>", re.I | re.S)
+# Child sitemaps that list individual posts, products or media rather than key pages.
+_BULK_SITEMAP_RE = re.compile(r"post|blog|product|image|video|news|tag|categor|author", re.I)
+
+def decode_body(resp: httpx.Response) -> str:
+    """Page text, decoded as UTF-8 whenever the bytes are valid UTF-8.
+
+    Some servers label UTF-8 pages with an old encoding (or none), which turns
+    dashes, quotes and pound signs into sequences like 'â€“'. Valid UTF-8 is
+    almost never anything else, so trust the bytes over the label.
+    """
+    try:
+        return resp.content.decode("utf-8")
+    except UnicodeDecodeError:
+        return resp.text
+
 
 BrowserMode = str  # "auto" (only when needed), "always", or "never"
 
@@ -34,9 +64,13 @@ class Crawler:
                  client: httpx.Client | None = None,
                  browser: BrowserMode | None = None,
                  renderer: Renderer | None = None,
-                 cache: PageCache | None = None) -> None:
+                 cache: PageCache | None = None,
+                 sitemap: bool | None = None) -> None:
         self.delay = delay
         self.cache = cache  # None = no page cache
+        if sitemap is None:
+            sitemap = os.environ.get("INFORMANT_SITEMAP", "on").strip().lower() not in _OFF
+        self.use_sitemap = sitemap
         mode = (browser or os.environ.get("INFORMANT_BROWSER") or "auto").lower()
         if mode not in ("auto", "always", "never"):
             raise ValueError(f"browser mode must be auto, always or never, not {mode!r}")
@@ -76,16 +110,26 @@ class Crawler:
         origin = f"{p.scheme}://{p.netloc}"
         if origin not in self._robots:
             rp = RobotFileParser()
-            try:
-                resp = self._http.get(f"{origin}/robots.txt")
-                if resp.status_code in (401, 403):
-                    rp.disallow_all = True
-                elif resp.status_code >= 400:
-                    rp.allow_all = True
-                else:
-                    rp.parse(resp.text.splitlines())
-            except httpx.HTTPError:
+            robots_url = f"{origin}/robots.txt"
+            # Reused for a day at most, so a site's new rules are picked up quickly.
+            hit = self.cache.get(robots_url, max_age=ROBOTS_MAX_AGE) if self.cache else None
+            status, text = (hit.status_code, hit.html) if hit else (None, "")
+            if hit is None:
+                try:
+                    resp = self._http.get(robots_url)
+                    status, text = resp.status_code, resp.text[:MAX_BYTES]
+                    if self.cache is not None:
+                        self.cache.put(robots_url, final_url=robots_url, status_code=status,
+                                       html=text if status < 400 else "", headers={},
+                                       rendered=False, fetched_at=utcnow())
+                except httpx.HTTPError:
+                    status = None
+            if status in (401, 403):
+                rp.disallow_all = True
+            elif status is None or status >= 400:
                 rp.allow_all = True
+            else:
+                rp.parse(text.splitlines())
             self._robots[origin] = rp
         return self._robots[origin]
 
@@ -97,6 +141,56 @@ class Crawler:
         rp = self._robots_for(url)
         d = rp.crawl_delay(USER_AGENT) if rp else None
         return min(float(d), 10.0) if d else 0.0
+
+    # --- sitemap ----------------------------------------------------------
+
+    def _fetch_text(self, url: str) -> str | None:
+        """Fetch a small text resource (a sitemap), politely and through the cache.
+        A missing file is cached too, as empty text, so it isn't asked for again."""
+        if self.cache is not None:
+            hit = self.cache.get(url)
+            if hit is not None:
+                return hit.html or None
+        if not self.allowed(url):
+            return None
+        self._wait(self._crawl_delay(url))
+        try:
+            resp = self._http.get(url)
+        except httpx.HTTPError:
+            return None
+        text = resp.text[:MAX_BYTES] if resp.status_code == 200 else ""
+        if self.cache is not None:
+            self.cache.put(url, final_url=str(resp.url), status_code=resp.status_code, html=text,
+                           headers={}, rendered=False, fetched_at=utcnow())
+        return text or None
+
+    def sitemap_urls(self, home_url: str) -> list[str]:
+        """Page addresses listed in the site's sitemap (declared in robots.txt, or at
+        /sitemap.xml). Reads at most a few files; an index file's page sitemaps
+        are preferred over its post, product and image ones."""
+        p = urlparse(home_url)
+        origin = f"{p.scheme}://{p.netloc}"
+        rp = self._robots_for(home_url)
+        declared = (rp.site_maps() or []) if rp is not None else []
+        queue = list(declared)[:2] or [f"{origin}/sitemap.xml"]
+        urls: list[str] = []
+        read = 0
+        while queue and read < MAX_SITEMAP_FILES and len(urls) < MAX_SITEMAP_URLS:
+            sitemap = queue.pop(0)
+            read += 1
+            if sitemap.lower().endswith(".gz"):
+                continue
+            text = self._fetch_text(sitemap)
+            if not text:
+                continue
+            locs = [html.unescape(m.strip()) for m in _LOC_RE.findall(text)]
+            if "<sitemapindex" in text.lower():
+                locs.sort(key=lambda u: (not re.search(r"page", u, re.I),
+                                         bool(_BULK_SITEMAP_RE.search(u))))
+                queue.extend(locs)
+            else:
+                urls.extend(locs)
+        return urls[:MAX_SITEMAP_URLS]
 
     # --- fetching ---------------------------------------------------------
 
@@ -198,8 +292,8 @@ class Crawler:
         ctype = resp.headers.get("content-type", "")
         if resp.status_code != 200 or "html" not in ctype:
             return Page(url=str(resp.url), kind=kind, status_code=resp.status_code)
-        html = resp.text[:MAX_BYTES]
-        page = parse_page(str(resp.url), kind, resp.status_code, html)
+        body = decode_body(resp)[:MAX_BYTES]
+        page = parse_page(str(resp.url), kind, resp.status_code, body)
         page.headers = dict(resp.headers)
         page.fetched_at = utcnow()
         return page
@@ -233,6 +327,24 @@ class Crawler:
             page = self.fetch(url, kind, result.notes)
             if page:
                 result.pages.append(page)
+
+        # Kinds the homepage didn't link to: look for them in the site's sitemap.
+        missing = [k for k in PAGE_KINDS if k not in {kind for _, kind in chosen}]
+        room = max_pages - len(result.pages)
+        if self.use_sitemap and missing and room > 0:
+            candidates = sitemap_candidates(self.sitemap_urls(home.url), home.url)
+            taken = {path_key(p.url) for p in result.pages} | {path_key(u) for u, _ in chosen}
+            from_sitemap = choose_pages(home, max_extra=room, links=candidates,
+                                        kinds=missing, taken=taken)
+            for url, kind in from_sitemap:
+                page = self.fetch(url, kind, result.notes)
+                if page:
+                    result.pages.append(page)
+            if from_sitemap:
+                result.notes.append(
+                    f"{len(from_sitemap)} page(s) found through the site's sitemap: "
+                    + ", ".join(kind for _, kind in from_sitemap))
+                chosen = chosen + from_sitemap
 
         # Kinds the homepage didn't link to: try the usual addresses directly.
         found_kinds = {kind for _, kind in chosen}

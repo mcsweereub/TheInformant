@@ -20,6 +20,7 @@ def extract_single(company_name: str, pages: list, complete: CompleteFn,
         notes.append("LLM answer reused from the local cache (same model, prompt and page text)")
     elif c.model and c.model.startswith("ollama/"):
         notes.append(f"{c.model} took {c.elapsed:.0f}s")
-    result = finish(c.data, c.model, notes)
+    result = finish(c.data, c.model, notes, source_text=page_text,
+                    company_name=company_name)
     result.strategy = "single"
     return result

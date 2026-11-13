@@ -2,16 +2,34 @@
 
 from __future__ import annotations
 
-from .fetch import Crawler
-from .parse import CrawlResult
-from .discovery import discover_website
-from .extract import detect_tech, extract_contacts, extract_social_links, verify_ownership
+import re
+
 from ...cache import LlmCache
 from ...llm import ExtractionResult, current_model, extract_with_llm
 from ...progress import ProgressFn, emit
-from ...schema import CompanyProfile, Location, Product, Source, WebPage, Website
+from ...schema import (
+    CompanyProfile,
+    Location,
+    Product,
+    Source,
+    StructuredData,
+    WebPage,
+    Website,
+)
+from .discovery import discover_website
+from .extract import (
+    detect_tech,
+    extract_contacts,
+    extract_social_links,
+    merge_structured_contacts,
+    verify_ownership,
+)
+from .fetch import Crawler
+from .parse import CrawlResult, Page
+from .structured import extract_structured
 
 _RANK = {"low": 0, "medium": 1, "high": 2}
+_POSTCODE = re.compile(r"[A-Z]{1,2}[0-9][0-9A-Z]? ?[0-9][A-Z]{2}")  # UK postcode
 
 
 def _page_meta_description(result: CrawlResult) -> str | None:
@@ -117,14 +135,37 @@ def research_website(
     site.social_links = extract_social_links(pages)
     profile.tech_stack = detect_tech(result)
     ident.website = site.url
+
+    # Facts the site declares in machine-readable form: exact, and free.
+    facts = extract_structured(pages)
+    site.structured = StructuredData(
+        name=facts.name, legal_name=facts.legal_name, description=facts.description,
+        logo_url=facts.logo_url, founding_date=facts.founding_date, employees=facts.employees,
+        vat_id=facts.vat_id, parent_organisation=facts.parent_organisation,
+        schema_types=facts.schema_types)
+    site.emails, site.phones, site.social_links = merge_structured_contacts(
+        site.emails, site.phones, site.social_links,
+        raw_emails=facts.emails, raw_phones=facts.telephones, same_as=facts.same_as)
+    for a in facts.addresses:
+        if _already_listed(profile.locations, a.get("postal_code"), a.get("street")):
+            continue
+        profile.locations.append(Location(
+            kind="office", address_lines=[a["street"]] if a.get("street") else [],
+            locality=a.get("locality"), region=a.get("region"),
+            postal_code=a.get("postal_code"), country=a.get("country"), sources=[web_source]))
     emit(progress, "extract", "done", None, tech=len(profile.tech_stack),
-         social=len(site.social_links))
+         social=len(site.social_links), structured=not facts.is_empty())
 
     if use_llm:
         backend, model = current_model()
         emit(progress, "llm", "started", f"Extracting with {backend}/{model}",
              backend=backend, model=model)
-        llm = extract_with_llm(ident.name, pages, strategy=llm_strategy, progress=progress,
+        material = list(pages)
+        if facts.as_text():  # give the model the declared facts first: short and reliable
+            material.insert(0, Page(url=site.url, kind="structured", status_code=200,
+                                    title="Facts this site declares about itself (schema.org data)",
+                                    text=facts.as_text()))
+        llm = extract_with_llm(ident.name, material, strategy=llm_strategy, progress=progress,
                                cache=llm_cache)
         site.notes.extend(llm.notes)
         _merge_llm(profile, llm, [p.url for p in pages])
@@ -136,7 +177,24 @@ def research_website(
                  products=len(profile.products))
     else:
         emit(progress, "llm", "skipped", "LLM disabled")
+
+    # No LLM summary (disabled, or it failed)? The site's own description is the next best.
+    if not ident.description:
+        ident.description = facts.description or site.meta_description
     return profile
+
+
+def _already_listed(locations: list[Location], postal_code: str | None, street: str | None) -> bool:
+    """True if a location with the same postcode (or the same street line) is already there."""
+    def norm(s: str | None) -> str:
+        return "".join((s or "").lower().split())
+
+    for loc in locations:
+        if postal_code and norm(loc.postal_code) == norm(postal_code):
+            return True
+        if street and any(norm(street) and norm(street) in norm(line) for line in loc.address_lines):
+            return True
+    return False
 
 
 def _source_for(claimed: str, page_urls: list[str], site_url: str | None) -> list[Source]:
@@ -172,6 +230,10 @@ def _merge_llm(profile: CompanyProfile, llm: ExtractionResult, page_urls: list[s
         for p in d.products
     ]
     for o in d.offices:
+        postcode = _POSTCODE.search(f"{o.address} {o.label}".upper())
+        if (o.address or postcode) and _already_listed(
+                profile.locations, postcode.group(0) if postcode else None, o.address or None):
+            continue  # the same address already came from the registry or structured data
         profile.locations.append(
             Location(kind="office", address_lines=[o.label, o.address] if o.address else [o.label],
                      locality=o.locality or None, country=o.country or None,

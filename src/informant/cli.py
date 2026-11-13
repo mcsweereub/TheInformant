@@ -151,6 +151,10 @@ def lookup(
     registry: str | None = typer.Option(
         None, "--registry", help="full (also filed accounts, share capital, charges, ownership, "
         "related companies) or basic [default: INFORMANT_REGISTRY or full]."),
+    news: bool | None = typer.Option(
+        None, "--news/--no-news", help="Search recent news [default: INFORMANT_NEWS, on]."),
+    news_days: int | None = typer.Option(
+        None, "--news-days", help="How far back to look for news [default: 90]."),
     json_mode: bool = JSON_OPT,
     progress: bool = typer.Option(False, "--progress", help="Write JSON progress events to stderr."),
 ) -> None:
@@ -167,7 +171,8 @@ def lookup(
             raise ConfigError("--registry must be full or basic.")
         kwargs = dict(website=website, web=web, llm=llm, max_pages=max_pages, filings=filings,
                       browser=browser, llm_strategy=llm_strategy, use_cache=cache,
-                      refresh=refresh, registry=registry)
+                      refresh=refresh, registry=registry, news=news,
+                      news_days=news_days)
 
         if progress or json_mode:
             callback = _write_progress_line if progress else None
@@ -214,6 +219,7 @@ def lookup(
         _print_registry(profile)
         if web:
             _print_website(profile)
+        _print_news(profile)
         active = sum(1 for o in profile.people.officers if o.active)
         out.print(
             f"[green]Wrote {path}[/green]  "
@@ -269,6 +275,26 @@ def _print_registry(profile: CompanyProfile) -> None:
     for f in profile.risk.flags:
         evidence = f" [dim]({f.evidence})[/dim]" if f.evidence else ""
         out.print(f"  [{colours[f.severity]}]{f.severity:>7}[/{colours[f.severity]}]  {f.message}{evidence}")
+
+
+def _print_news(profile: CompanyProfile) -> None:
+    news = profile.news
+    if not news.items and not news.notes:
+        return
+    marks = {-1.0: "[red]-[/red]", 0.0: "[dim]o[/dim]", 1.0: "[green]+[/green]"}
+    shown = [n for n in news.items if n.relevant is not False]
+    out.print(f"News: {len(shown)} article(s) in the last {news.window_days} days"
+              + (f" (searched for: {', '.join(news.searched_for)})" if news.searched_for else ""))
+    for item in shown[:8]:
+        when = item.published_at.date().isoformat() if item.published_at else "          "
+        mark = marks.get(item.sentiment, " ")
+        topic = f" [dim]{item.topic}[/dim]" if item.topic else ""
+        out.print(f"  {mark} {when}  {item.title} [dim]({item.publisher or item.provider})[/dim]{topic}",
+                  highlight=False)
+    if len(shown) > 8:
+        out.print(f"  [dim]and {len(shown) - 8} more in the JSON file[/dim]")
+    for note in news.notes:
+        out.print(f"  [dim]news: {note}[/dim]")
 
 
 def _print_website(profile: CompanyProfile) -> None:

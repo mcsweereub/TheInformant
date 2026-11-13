@@ -18,7 +18,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-SCHEMA_VERSION = "0.5.0"
+SCHEMA_VERSION = "0.7.0"
 
 SourceName = Literal[
     "companies_house",
@@ -317,8 +317,24 @@ class WebPage(BaseModel):
     cached: bool = False  # this run reused a locally cached copy
 
 
+class StructuredData(BaseModel):
+    """Facts the site publishes about itself in machine-readable form (schema.org
+    JSON-LD and OpenGraph tags). Exact, and read without an LLM."""
+
+    name: str | None = None
+    legal_name: str | None = None
+    description: str | None = None
+    logo_url: str | None = None
+    founding_date: str | None = None
+    employees: str | None = None
+    vat_id: str | None = None
+    parent_organisation: str | None = None
+    schema_types: list[str] = Field(default_factory=list)  # e.g. Organization, Bakery
+
+
 class Website(Sourced):
     url: str | None = None
+    structured: StructuredData = Field(default_factory=StructuredData)
     discovered_via: Literal["user", "wikidata", "domain_guess"] | None = None
     confidence: Literal["high", "medium", "low"] | None = None
     verification: list[str] = Field(default_factory=list)  # why we think it's theirs
@@ -348,8 +364,25 @@ class NewsItem(Sourced):
     url: str
     published_at: datetime | None = None
     publisher: str | None = None
-    summary: str | None = None
-    sentiment: float | None = None  # -1.0 (negative) .. 1.0 (positive)
+    summary: str | None = None  # the feed's short snippet, never the article text
+    sentiment: float | None = None  # -1.0 (negative), 0.0 (neutral), 1.0 (positive); LLM
+    topic: str | None = None  # kind of story, from a fixed list (LLM)
+    provider: str | None = None  # which news source returned it: bing, gdelt, guardian
+    # False when the LLM thinks the headline isn't really about this company (it only
+    # shares the name, or mentions it in passing). Kept rather than dropped, because
+    # small models misjudge some genuine stories; consumers can filter on it.
+    relevant: bool | None = None
+
+
+class News(Sourced):
+    """Recent headlines that name the company, newest first. Items with
+    relevant=False are doubtful (see NewsItem.relevant)."""
+
+    items: list[NewsItem] = Field(default_factory=list)
+    searched_for: list[str] = Field(default_factory=list)  # names used in the search
+    window_days: int | None = None
+    providers: list[str] = Field(default_factory=list)  # sources that answered
+    notes: list[str] = Field(default_factory=list)
 
 
 class JobPosting(Sourced):
@@ -386,7 +419,7 @@ class CompanyProfile(BaseModel):
     website: Website = Field(default_factory=Website)
     products: list[Product] = Field(default_factory=list)
     tech_stack: list[str] = Field(default_factory=list)
-    news: list[NewsItem] = Field(default_factory=list)
+    news: News = Field(default_factory=News)
     hiring: Hiring = Field(default_factory=Hiring)
 
     def to_json(self) -> str:

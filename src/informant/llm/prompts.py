@@ -3,10 +3,14 @@ model must fill. Shared by every backend so Claude and local models behave alike
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from typing import Annotated, Any, Literal, get_args
 
-# A fixed vocabulary keeps categorisation consistent across companies.
-SECTORS = [
+from pydantic import BaseModel, BeforeValidator, Field
+
+# A fixed vocabulary keeps categorisation consistent across companies. It is part
+# of the output schema itself (an enum), so a model that honours the schema can't
+# write anything else.
+Sector = Literal[
     "Agriculture & Food Production", "Automotive", "Construction & Real Estate",
     "Consumer Goods", "Creative & Media", "Defence & Aerospace", "Education",
     "Energy & Utilities", "Engineering & Manufacturing", "Financial Services",
@@ -16,6 +20,47 @@ SECTORS = [
     "Non-profit & Charity", "Retail & E-commerce", "Software & IT Services",
     "Telecommunications", "Travel & Tourism", "Other",
 ]
+SECTORS: list[str] = list(get_args(Sector))
+
+BusinessModel = Literal["B2B", "B2C", "B2B2C", "marketplace", "public sector", "mixed", "unknown"]
+BUSINESS_MODELS: tuple[str, ...] = get_args(BusinessModel)
+BUSINESS_MODEL_GUIDE = (
+    "B2C if it sells mainly to individual consumers, B2B if it sells mainly to other "
+    "businesses, B2B2C if it reaches consumers through other businesses, marketplace if it "
+    "connects buyers and sellers, public sector if it mainly serves government bodies, "
+    "mixed if it clearly serves both consumers and businesses, and unknown if the text "
+    "doesn't say. A shop, bank or app that the public uses directly is B2C, or mixed if "
+    "it also has business customers; it is B2B2C only when its products reach the public "
+    "through partner companies")
+
+MAX_SECTORS, MAX_TAGS, MAX_MARKETS, MAX_ITEMS, MAX_FACTS = 3, 10, 8, 15, 12
+
+
+# The schema states the limits (so constrained decoding enforces them), and these
+# validators make parsing tolerant when a backend ignores them: unknown values are
+# dropped and long lists cut, instead of the whole answer being rejected.
+def _known_sectors(value: Any) -> Any:
+    if isinstance(value, list):
+        return [s for s in value if s in SECTORS][:MAX_SECTORS]
+    return value
+
+
+def _known_business_model(value: Any) -> Any:
+    if isinstance(value, str):
+        wanted = value.strip().lower()
+        return next((m for m in BUSINESS_MODELS if m.lower() == wanted), "unknown")
+    return value
+
+
+def _at_most(n: int) -> BeforeValidator:
+    return BeforeValidator(lambda v: v[:n] if isinstance(v, list) else v)
+
+
+SectorList = Annotated[list[Sector], BeforeValidator(_known_sectors), Field(max_length=MAX_SECTORS)]
+BusinessModelField = Annotated[BusinessModel, BeforeValidator(_known_business_model)]
+TagList = Annotated[list[str], _at_most(MAX_TAGS), Field(max_length=MAX_TAGS)]
+MarketList = Annotated[list[str], _at_most(MAX_MARKETS), Field(max_length=MAX_MARKETS)]
+FactList = Annotated[list[str], _at_most(MAX_FACTS), Field(max_length=MAX_FACTS)]
 
 SYSTEM_PROMPT = f"""You read the text of a company's own website and record facts about that company for a personal research database. You reply with JSON only.
 
@@ -26,8 +71,8 @@ Record facts about the company, never about people: leave out the names and deta
 What to record:
 Write a summary of two or three plain sentences saying what the company does and who its customers are.
 Choose between one and three sectors, using only these exact names: {"; ".join(SECTORS)}.
-Give between three and ten tags: short lowercase keywords that would help group similar companies, such as bakery, franchise, saas or b2b payments.
-Give the business model as exactly one of: B2B, B2C, B2B2C, marketplace, public sector, mixed, unknown.
+Give between three and ten tags: short lowercase keywords that would help group similar companies, such as bakery, franchise, saas or b2b payments. Take each tag from wording the text itself uses, spelled the same way, and make every tag different in meaning from the others.
+Give the business model: {BUSINESS_MODEL_GUIDE}.
 List the target markets: the kinds of customers or the regions the company sells to.
 List up to 15 of the main products, services or product lines, each with a one-sentence description and a short category.
 List up to 15 physical sites that the pages name, such as offices, factories or flagship locations. For a chain with hundreds of shops, give only the headquarters and mention the shop network in the summary.
@@ -51,14 +96,18 @@ class ExtractedOffice(BaseModel):
     source_page: str
 
 
+ProductList = Annotated[list[ExtractedProduct], _at_most(MAX_ITEMS), Field(max_length=MAX_ITEMS)]
+OfficeList = Annotated[list[ExtractedOffice], _at_most(MAX_ITEMS), Field(max_length=MAX_ITEMS)]
+
+
 class WebsiteExtraction(BaseModel):
     summary: str
-    business_model: str
-    sectors: list[str]
-    tags: list[str]
-    target_markets: list[str]
-    products: list[ExtractedProduct]
-    offices: list[ExtractedOffice]
+    business_model: BusinessModelField
+    sectors: SectorList
+    tags: TagList
+    target_markets: MarketList
+    products: ProductList
+    offices: OfficeList
 
 
 # --- staged extraction: notes per part, then one merge ------------------------
@@ -84,10 +133,10 @@ Every value you write must describe this particular company and come from this t
 
 
 class ChunkFindings(BaseModel):
-    key_facts: list[str]
-    products: list[ExtractedProduct]
-    offices: list[ExtractedOffice]
-    target_markets: list[str]
+    key_facts: FactList
+    products: ProductList
+    offices: OfficeList
+    target_markets: MarketList
 
 
 MERGE_SYSTEM_PROMPT = f"""You combine research notes about a company into a short profile for a personal research database. You reply with JSON only.
@@ -97,8 +146,8 @@ Use only the notes you are given. Don't add facts from general knowledge. Descri
 What to write:
 Write a summary of two or three plain sentences saying what the company does and who its customers are.
 Choose between one and three sectors, using only these exact names: {"; ".join(SECTORS)}.
-Give between three and ten tags: short lowercase keywords that would help group similar companies, such as bakery, franchise, saas or b2b payments.
-Give the business model as exactly one of: B2B, B2C, B2B2C, marketplace, public sector, mixed, unknown.
+Give between three and ten tags: short lowercase keywords that would help group similar companies, such as bakery, franchise, saas or b2b payments. Take each tag from wording the text itself uses, spelled the same way, and make every tag different in meaning from the others.
+Give the business model: {BUSINESS_MODEL_GUIDE}.
 List the target markets, combining the ones in the notes without repeating any.
 
 Every value you write must describe this particular company and come from the notes. Never copy wording from these instructions into your answer."""
@@ -106,10 +155,10 @@ Every value you write must describe this particular company and come from the no
 
 class MergedProfile(BaseModel):
     summary: str
-    business_model: str
-    sectors: list[str]
-    tags: list[str]
-    target_markets: list[str]
+    business_model: BusinessModelField
+    sectors: SectorList
+    tags: TagList
+    target_markets: MarketList
 
 
 def stage_message(company_name: str, text: str, part: int, parts: int) -> str:
