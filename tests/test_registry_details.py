@@ -467,7 +467,7 @@ def test_full_lookup_fills_every_registry_section(full_registry):
     data = json.loads(result.stdout)
     p = data["profile"]
 
-    assert p["schema_version"] == "0.7.0"
+    assert p["schema_version"] == "0.9.0"
     assert p["financials"]["periods"][0]["net_assets"] == 6_184_992
     assert p["capital"]["events"][0]["kind"] == "allotment"
     assert p["charges"]["outstanding"] == 1 and p["identity"]["has_charges"] is True

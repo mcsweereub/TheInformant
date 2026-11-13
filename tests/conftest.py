@@ -16,4 +16,8 @@ def no_cache_by_default(monkeypatch):
     monkeypatch.setenv("INFORMANT_SITEMAP", "off")
     # News makes requests to outside feeds; it is tested in test_news.py.
     monkeypatch.setenv("INFORMANT_NEWS", "off")
+    # Wikipedia likewise (tested in test_wikipedia.py); and never send the user's contact
+    # details from tests, even if a test loads the real .env.
+    monkeypatch.setenv("INFORMANT_WIKIPEDIA", "off")
+    monkeypatch.delenv("INFORMANT_CONTACT", raising=False)
     monkeypatch.delenv("GUARDIAN_API_KEY", raising=False)

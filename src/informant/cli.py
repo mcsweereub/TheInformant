@@ -155,6 +155,9 @@ def lookup(
         None, "--news/--no-news", help="Search recent news [default: INFORMANT_NEWS, on]."),
     news_days: int | None = typer.Option(
         None, "--news-days", help="How far back to look for news [default: 90]."),
+    wikipedia: bool | None = typer.Option(
+        None, "--wikipedia/--no-wikipedia",
+        help="Look up Wikipedia/Wikidata (needs INFORMANT_CONTACT) [default: INFORMANT_WIKIPEDIA, on]."),
     json_mode: bool = JSON_OPT,
     progress: bool = typer.Option(False, "--progress", help="Write JSON progress events to stderr."),
 ) -> None:
@@ -172,7 +175,7 @@ def lookup(
         kwargs = dict(website=website, web=web, llm=llm, max_pages=max_pages, filings=filings,
                       browser=browser, llm_strategy=llm_strategy, use_cache=cache,
                       refresh=refresh, registry=registry, news=news,
-                      news_days=news_days)
+                      news_days=news_days, wikipedia=wikipedia)
 
         if progress or json_mode:
             callback = _write_progress_line if progress else None
@@ -217,8 +220,12 @@ def lookup(
             for h in result.alternatives:
                 err.print(f"  [dim]also: {h.title} ({h.company_number}, {h.status})[/dim]")
         _print_registry(profile)
+        _print_wikipedia(profile)
         if web:
             _print_website(profile)
+        elif profile.identity.description:
+            out.print(f"  [italic]{profile.identity.description}[/italic]", highlight=False)
+        _print_history_and_funding(profile)
         _print_news(profile)
         active = sum(1 for o in profile.people.officers if o.active)
         out.print(
@@ -275,6 +282,44 @@ def _print_registry(profile: CompanyProfile) -> None:
     for f in profile.risk.flags:
         evidence = f" [dim]({f.evidence})[/dim]" if f.evidence else ""
         out.print(f"  [{colours[f.severity]}]{f.severity:>7}[/{colours[f.severity]}]  {f.message}{evidence}")
+
+
+def _print_wikipedia(profile: CompanyProfile) -> None:
+    wiki = profile.wikipedia
+    if not (wiki.title or wiki.wikidata_id):
+        return
+    facts = [f"founded {wiki.founded}" if wiki.founded else None,
+             ", ".join(wiki.industries) or None,
+             f"HQ {wiki.headquarters}" if wiki.headquarters else None,
+             f"parent {wiki.parent_organisation}" if wiki.parent_organisation else None,
+             "; ".join(wiki.stock_listings) or None]
+    how = "matched by company number" if wiki.matched_by == "company_number" else "matched by name"
+    out.print(f"Wikipedia: [bold]{wiki.title or wiki.wikidata_id}[/bold] ({how})"
+              + (f": {wiki.description}" if wiki.description else ""), highlight=False)
+    detail = " | ".join(f for f in facts if f)
+    if detail:
+        out.print(f"  {detail}", highlight=False)
+    if wiki.references:
+        out.print(f"  [dim]{len(wiki.references)} references listed in the JSON file[/dim]")
+
+
+def _print_history_and_funding(profile: CompanyProfile) -> None:
+    if profile.history:
+        out.print(f"History ({len(profile.history)} milestones):")
+        for m in profile.history[:12]:
+            out.print(f"  {m.year}  {m.event}", highlight=False)
+        if len(profile.history) > 12:
+            out.print(f"  [dim]and {len(profile.history) - 12} more in the JSON file[/dim]")
+    funding = profile.funding
+    for r in funding.rounds:
+        parts = [r.year, r.round, r.amount]
+        who = f" from {', '.join(r.investors)}" if r.investors else ""
+        out.print(f"Funding: {' '.join(p for p in parts if p)}{who}", highlight=False)
+    if funding.shareholders:
+        holders = ", ".join(s.name + (f" ({s.stake})" if s.stake else "") for s in funding.shareholders)
+        out.print(f"Shareholders mentioned: {holders}", highlight=False)
+    if profile.key_facts:
+        out.print(f"[dim]{len(profile.key_facts)} key facts in the JSON file[/dim]")
 
 
 def _print_news(profile: CompanyProfile) -> None:

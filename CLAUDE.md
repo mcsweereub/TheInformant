@@ -70,8 +70,8 @@ personal research. A separate, future program will visualise/categorise the outp
     combined in code, the merge call only writes summary/sectors/tags); `extract.py` picks
     backend + strategy (`--llm-strategy`: auto = single for Claude, staged for Ollama when the
     de-duplicated text exceeds ~12k chars); `make_complete()` gives any feature the configured
-    backend + cache. Staged defaults: 3 parts x 7,000 chars (was 5 x 9,000; Monzo took 17-27
-    min that way and later parts added little).
+    backend + cache. Staged defaults: 5 parts x 9,000 chars (quality first, the user's choice;
+    a big site takes 20-30 min on their laptop).
   - `news.py`: one call judges all headlines (relevance, sentiment, topic) from fixed lists.
 - `sources/news.py`: Bing News RSS (one query per name; the feed ignores OR) + GDELT DOC API
   (1 request / 5 s, often 429s; best-effort) + Guardian API if GUARDIAN_API_KEY. Google News
@@ -80,6 +80,25 @@ personal research. A separate, future program will visualise/categorise the outp
   `pipeline.research_news()` fills `profile.news`; doubtful headlines are kept with
   relevant=False (qwen dropped real "Nubank not pursuing Monzo" stories) and hidden in the CLI.
   qwen3:4b rates nearly all headlines neutral: sentiment from it is weak.
+- `sources/wikipedia.py`: Wikidata by Companies House number (P2622 via a `haswbstatement`
+  search), else a Wikipedia search accepted only for a UK entity with a matching name and no
+  different P2622. Reads organisation facts (never P112 founders or other people), the REST
+  summary, the whole article up to the references minus people sections (`drop_people_sections`;
+  40k safety cap), and the references list (REST page/html, `ol.references li`) into
+  `wikipedia.references` for the GUI. `pipeline.research_wikipedia()` runs before the website;
+  its article goes to the LLM as `extra_material` (also when no site is found, and with
+  `--no-web` via `research.extract_from_material`); Wikidata industries become tags. Needs
+  INFORMANT_CONTACT (set to the user's email with their approval, sent to Wikimedia only).
+  Off in tests via conftest, which also unsets the contact.
+- LLM output also has `key_facts`, `milestones`, `funding_rounds`, `shareholders` (organisations
+  only, never individuals). `result.tidy_history_and_funding` + `ground_history_and_funding`
+  check them (milestone year and words in the text, investors/shareholders named there);
+  `research._merge_llm` maps them to `profile.history`, `key_facts`, `funding`. A milestone whose
+  text names a different year takes that year; "unknown" stakes/amounts are blanked.
+  `result.reconcile_business_model` overrides the model when its own summary/markets name
+  consumers (qwen keeps saying B2B/B2B2C for Monzo and Greggs). Prompts forbid naming any
+  individual in any value (qwen named Monzo's founder in a milestone).
+- `sources/fetchutil.py`: `cached_get()` for API calls through the page cache.
 
 ## Integration
 - TheInformant must stay a standalone console app. A GUI (planned: React + local Python API
@@ -87,9 +106,9 @@ personal research. A separate, future program will visualise/categorise the outp
   `--json` CLI contract or by importing `informant.pipeline`. Don't put GUI code here.
 
 ## Gotchas
-- Don't write Python source (or this file) through bash heredocs containing backslash escapes
-  such as backslash-b or backslash-n: they have turned into real control characters and line
-  breaks here. Use the Write/Edit tools.
+- Don't write Python source (or this file) through bash heredocs or `python -c` strings
+  containing backslash escapes (backslash-b, backslash-n) or backticks: they have turned into
+  control characters, line breaks and shell command substitution here. Use the Write/Edit tools.
 
 ## Ground rules
 - Company-focused. Store data about people **only** from official registries
@@ -114,13 +133,15 @@ Also done: Companies House depth (accounts, capital, charges, ownership, related
 Tests: older tests run with INFORMANT_REGISTRY=basic (conftest); full depth is tested in
 `tests/test_registry_details.py`.
 Also done: answer checks (schema enums, grounding, output cap `num_predict`), structured data
-(JSON-LD/OpenGraph), sitemap page discovery, news (Bing + GDELT + optional Guardian).
+(JSON-LD/OpenGraph), sitemap page discovery, news (Bing + GDELT + optional Guardian),
+Wikipedia/Wikidata, tags from Wikidata industries, tag top-up ignores 2-letter acronyms,
+history/funding/shareholders/key facts, Wikipedia references (schema 0.9.0).
+The user prefers quality over speed: keep the staged defaults large, and make tests fast by
+choosing small test companies, never by shrinking what the tool reads.
 
 Agreed next, in this order (the user liked all of these):
-2. Sources, one at a time: Wikipedia (official API, needs INFORMANT_CONTACT), then web search
-   (official API with free tier, e.g. Brave). New sources feed the staged pipeline as extra
-   material; no separate LLM plumbing. Tag quality: prefer tags from structured data /
-   frequent terms over the small model's free choice (it invents "lpg" for LNG).
+2. Web search (official API with a free tier, e.g. Brave). New sources feed the staged
+   pipeline as extra material (`extra_material`); no separate LLM plumbing.
 3. Customers: extract named client companies into the profile; resolve UK ones to Companies
    House numbers; optional `--with-customers` deep dive; customer links in the index.
 4. More legal public data the user approved: Companies House bulk downloads (offline

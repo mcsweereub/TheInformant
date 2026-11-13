@@ -9,7 +9,7 @@ Each call has its own time limit, so a slow model can still finish a large
 site. A failed part is skipped; a failed merge falls back to a summary built
 from the notes, so finished work is never thrown away.
 
-INFORMANT_STAGE_CHARS (default 7000) and INFORMANT_MAX_STAGES (default 3) tune
+INFORMANT_STAGE_CHARS (default 9000) and INFORMANT_MAX_STAGES (default 5) tune
 the part size and the maximum number of parts.
 """
 
@@ -21,11 +21,17 @@ from ..progress import ProgressFn, emit
 from .backends.base import CompleteFn
 from .budget import fair_shares, remove_repeated_lines
 from .prompts import (
+    MAX_FUNDING,
+    MAX_MILESTONES,
+    MAX_SHAREHOLDERS,
     MERGE_SYSTEM_PROMPT,
     STAGE_SYSTEM_PROMPT,
     ChunkFindings,
+    ExtractedFunding,
+    ExtractedMilestone,
     ExtractedOffice,
     ExtractedProduct,
+    ExtractedShareholder,
     MergedProfile,
     WebsiteExtraction,
     merge_message,
@@ -33,11 +39,11 @@ from .prompts import (
 )
 from .result import ExtractionResult, echoed, finish
 
-# Measured on a CPU-only laptop (qwen3:4b): a 9,000-character part takes 4-5 minutes, and
-# parts beyond the third added little (later pages repeat the story). 3 x 7,000 keeps a
-# large site to roughly 10-12 minutes; every page still gets a fair share of the total.
-DEFAULT_STAGE_CHARS = 7_000
-DEFAULT_MAX_STAGES = 3
+# Quality over speed (the user's choice): 5 parts of 9,000 characters read most of a large
+# site. On a CPU-only laptop (qwen3:4b) each part takes 4-5 minutes, so a big site can take
+# 20-30 minutes. For quick tests use a small company, not smaller settings.
+DEFAULT_STAGE_CHARS = 9_000
+DEFAULT_MAX_STAGES = 5
 HEADER_ALLOWANCE = 300  # room for the "=== PAGE ..." header on each piece
 MAX_FACTS = 40
 MAX_ITEMS = 15
@@ -157,6 +163,9 @@ def extract_staged(company_name: str, pages: list, complete: CompleteFn,
     products: list[ExtractedProduct] = []
     offices: list[ExtractedOffice] = []
     markets: list[str] = []
+    milestones: list[ExtractedMilestone] = []
+    funding: list[ExtractedFunding] = []
+    shareholders: list[ExtractedShareholder] = []
     model: str | None = None
     elapsed = 0.0
     calls = 0
@@ -184,11 +193,18 @@ def extract_staged(company_name: str, pages: list, complete: CompleteFn,
         products += [p for p in f.products if p.name.strip() and not echoed(p.name)]
         offices += [o for o in f.offices if o.label.strip() and not echoed(o.label)]
         markets += [m.strip() for m in f.target_markets if m.strip() and not echoed(m)]
+        milestones += f.milestones
+        funding += f.funding_rounds
+        shareholders += f.shareholders
 
     facts = _dedupe(facts, _norm)
+    all_facts = facts
     if len(facts) > MAX_FACTS:
         notes.append(f"kept {MAX_FACTS} of {len(facts)} notes for the merge step")
         facts = facts[:MAX_FACTS]
+    milestones = _dedupe(milestones, lambda m: f"{m.year} {_norm(m.event)[:60]}")[:MAX_MILESTONES]
+    funding = _dedupe(funding, lambda r: f"{r.year} {_norm(r.amount)} {_norm(r.round)}")[:MAX_FUNDING]
+    shareholders = _dedupe(shareholders, lambda s: _norm(s.name))[:MAX_SHAREHOLDERS]
     products = _dedupe(products, lambda p: _norm(p.name))[:MAX_ITEMS]
     offices = _dedupe(offices, lambda o: _norm(f"{o.label} {o.address}"))[:MAX_ITEMS]
     markets = _dedupe(markets, _norm)
@@ -222,6 +238,10 @@ def extract_staged(company_name: str, pages: list, complete: CompleteFn,
         target_markets=merged.target_markets or markets,
         products=products,
         offices=offices,
+        key_facts=all_facts[:20],
+        milestones=milestones,
+        funding_rounds=funding,
+        shareholders=shareholders,
     )
     result = finish(data, model, notes, source_text="\n".join(chunks), company_name=company_name)
     result.strategy = "staged"

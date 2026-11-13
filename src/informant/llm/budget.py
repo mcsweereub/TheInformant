@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # avoid importing the website package at runtime (import cycle)
     from ..sources.website.parse import Page
 
-PAGE_CHAR_LIMIT = 12_000
+# Most per page in a single call: a full Wikipedia article can be 15-20k characters.
+PAGE_CHAR_LIMIT = 20_000
 TOTAL_CHAR_LIMIT = 60_000  # Claude
 OLLAMA_TOTAL_CHAR_LIMIT = 28_000  # ~7k tokens, leaves room in the context for prompt + output
 

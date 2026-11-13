@@ -65,6 +65,10 @@ def index_entry(profile: CompanyProfile, file_name: str) -> dict[str, Any]:
         "sectors": profile.classification.sectors,
         "sic_codes": [s.code for s in profile.classification.sic_codes],
         "llm_model": profile.website.llm_model,
+        "wikipedia": profile.wikipedia.url,
+        "first_year": profile.history[0].year if profile.history else None,
+        "milestones": len(profile.history),
+        "funding_rounds": len(profile.funding.rounds),
         "news_count": sum(1 for n in profile.news.items if n.relevant is not False),
         "latest_news_at": max((n.published_at.isoformat() for n in profile.news.items
                                if n.published_at), default=None),

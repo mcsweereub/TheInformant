@@ -27,6 +27,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 
 from ..schema import utcnow
+from .fetchutil import cached_get
 from .website.extract import core_name, site_host
 
 USER_AGENT = "Mozilla/5.0 (compatible; informant/0.1; personal company research)"
@@ -114,17 +115,7 @@ def _clean(text: str | None) -> str | None:
 
 def _get(http: httpx.Client, cache, url: str, params: dict) -> str:
     """GET through the page cache (feeds are reused for a few hours)."""
-    full = str(httpx.URL(url, params=params))
-    if cache is not None:
-        hit = cache.get(full, max_age=FEED_MAX_AGE)
-        if hit is not None and hit.status_code == 200:
-            return hit.html
-    resp = http.get(url, params=params)
-    resp.raise_for_status()
-    if cache is not None:
-        cache.put(full, final_url=full, status_code=200, html=resp.text, headers={},
-                  rendered=False, fetched_at=utcnow())
-    return resp.text
+    return cached_get(http, cache, url, params, max_age=FEED_MAX_AGE)
 
 
 # --- providers ------------------------------------------------------------------

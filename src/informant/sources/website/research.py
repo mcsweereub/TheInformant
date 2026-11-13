@@ -9,8 +9,13 @@ from ...llm import ExtractionResult, current_model, extract_with_llm
 from ...progress import ProgressFn, emit
 from ...schema import (
     CompanyProfile,
+    Funding,
+    FundingRound,
+    KeyFact,
     Location,
+    Milestone,
     Product,
+    Shareholder,
     Source,
     StructuredData,
     WebPage,
@@ -27,6 +32,14 @@ from .extract import (
 from .fetch import Crawler
 from .parse import CrawlResult, Page
 from .structured import extract_structured
+
+
+def summary_sentences(text: str | None, n: int = 2) -> str | None:
+    """The first `n` sentences of a summary, for use as a short description."""
+    if not text:
+        return None
+    parts = re.split(r"(?<=[.!?])\s+(?=[A-Z])", text.strip())
+    return " ".join(parts[:n]) or None
 
 _RANK = {"low": 0, "medium": 1, "high": 2}
 _POSTCODE = re.compile(r"[A-Z]{1,2}[0-9][0-9A-Z]? ?[0-9][A-Z]{2}")  # UK postcode
@@ -55,12 +68,31 @@ def research_website(
     llm_strategy: str | None = None,
     llm_cache: LlmCache | None = None,
     progress: ProgressFn | None = None,
+    extra_material: list[Page] | None = None,
 ) -> CompanyProfile:
-    """Fill the website-derived sections of `profile` in place and return it."""
+    """Fill the website-derived sections of `profile` in place and return it.
+
+    `extra_material` (e.g. the Wikipedia article) is given to the LLM alongside the
+    website's pages, and on its own if no website is found."""
     ident = profile.identity
+    extra = [p for p in (extra_material or []) if p.text.strip()]
     postcode = next(
         (l.postal_code for l in profile.locations if l.kind == "registered_office"), None
     )
+
+    def run_llm(material: list[Page]) -> None:
+        if not use_llm:
+            emit(progress, "llm", "skipped", "LLM disabled")
+            return
+        extract_from_material(profile, material, llm_strategy=llm_strategy,
+                              llm_cache=llm_cache, progress=progress)
+
+    def fallback_description(declared: str | None = None) -> None:
+        # No LLM summary (disabled, or it failed)? Next best: the Wikipedia lead, then
+        # what the site says about itself.
+        if not ident.description:
+            ident.description = (summary_sentences(profile.wikipedia.summary) or declared
+                                 or profile.website.meta_description)
 
     emit(progress, "website_discovery", "started", "Finding the company website")
     found = discover_website(
@@ -80,8 +112,10 @@ def research_website(
     profile.website = site
     if not found.url:
         emit(progress, "website_discovery", "failed", "Website not found")
-        for stage in ("crawl", "extract", "llm"):
+        for stage in ("crawl", "extract"):
             emit(progress, stage, "skipped", "No website")
+        run_llm(extra)
+        fallback_description()
         return profile
     emit(progress, "website_discovery", "done", found.url,
          url=found.url, via=found.via, confidence=found.confidence)
@@ -100,8 +134,9 @@ def research_website(
     if not pages:
         site.notes.append("no readable pages; nothing extracted")
         emit(progress, "crawl", "failed", "No readable pages")
-        for stage in ("extract", "llm"):
-            emit(progress, stage, "skipped", "No readable pages")
+        emit(progress, "extract", "skipped", "No readable pages")
+        run_llm(extra)
+        fallback_description()
         return profile
     rendered = sum(1 for p in pages if p.rendered)
     emit(progress, "crawl", "done",
@@ -156,32 +191,39 @@ def research_website(
     emit(progress, "extract", "done", None, tech=len(profile.tech_stack),
          social=len(site.social_links), structured=not facts.is_empty())
 
-    if use_llm:
-        backend, model = current_model()
-        emit(progress, "llm", "started", f"Extracting with {backend}/{model}",
-             backend=backend, model=model)
-        material = list(pages)
-        if facts.as_text():  # give the model the declared facts first: short and reliable
-            material.insert(0, Page(url=site.url, kind="structured", status_code=200,
-                                    title="Facts this site declares about itself (schema.org data)",
-                                    text=facts.as_text()))
-        llm = extract_with_llm(ident.name, material, strategy=llm_strategy, progress=progress,
-                               cache=llm_cache)
-        site.notes.extend(llm.notes)
-        _merge_llm(profile, llm, [p.url for p in pages])
-        if llm.data is None:
-            emit(progress, "llm", "failed", llm.notes[-1] if llm.notes else "No result",
-                 strategy=llm.strategy)
-        else:
-            emit(progress, "llm", "done", None, model=llm.model, strategy=llm.strategy,
-                 products=len(profile.products))
-    else:
-        emit(progress, "llm", "skipped", "LLM disabled")
-
-    # No LLM summary (disabled, or it failed)? The site's own description is the next best.
-    if not ident.description:
-        ident.description = facts.description or site.meta_description
+    # Short, reliable facts first (what the site declares, then Wikipedia), then the pages.
+    material: list[Page] = []
+    if facts.as_text():
+        material.append(Page(url=site.url, kind="structured", status_code=200,
+                             title="Facts this site declares about itself (schema.org data)",
+                             text=facts.as_text()))
+    run_llm(material + extra + list(pages))
+    fallback_description(facts.description)
     return profile
+
+
+def extract_from_material(profile: CompanyProfile, material: list[Page], *,
+                          llm_strategy: str | None = None, llm_cache: LlmCache | None = None,
+                          progress: ProgressFn | None = None) -> None:
+    """Run the LLM over any material (website pages, a Wikipedia article...) and merge
+    the result into the profile. Notes go to website.notes."""
+    material = [p for p in material if p.text.strip()]
+    if not material:
+        emit(progress, "llm", "skipped", "Nothing to read")
+        return
+    backend, model = current_model()
+    emit(progress, "llm", "started", f"Extracting with {backend}/{model}",
+         backend=backend, model=model)
+    llm = extract_with_llm(profile.identity.name, material, strategy=llm_strategy,
+                           progress=progress, cache=llm_cache)
+    profile.website.notes.extend(llm.notes)
+    _merge_llm(profile, llm, [p.url for p in material])
+    if llm.data is None:
+        emit(progress, "llm", "failed", llm.notes[-1] if llm.notes else "No result",
+             strategy=llm.strategy)
+    else:
+        emit(progress, "llm", "done", None, model=llm.model, strategy=llm.strategy,
+             products=len(profile.products))
 
 
 def _already_listed(locations: list[Location], postal_code: str | None, street: str | None) -> bool:
@@ -212,7 +254,9 @@ def _merge_llm(profile: CompanyProfile, llm: ExtractionResult, page_urls: list[s
     if llm.data is None:
         return
     d = llm.data
-    site_url = profile.website.url
+    # Fallback source when the model names no crawled page: the website, or (when there's
+    # no website) the first piece of material, e.g. the Wikipedia article.
+    site_url = profile.website.url or (page_urls[0] if page_urls else None)
 
     profile.website.llm_model = llm.model
     profile.identity.description = d.summary
@@ -239,3 +283,19 @@ def _merge_llm(profile: CompanyProfile, llm: ExtractionResult, page_urls: list[s
                      locality=o.locality or None, country=o.country or None,
                      sources=_source_for(o.source_page, page_urls, site_url))
         )
+
+    profile.history = [
+        Milestone(year=m.year, event=m.event, sources=_source_for(m.source_page, page_urls, site_url))
+        for m in d.milestones
+    ]
+    profile.key_facts = [KeyFact(text=f, sources=[Source(name="llm_extraction", url=site_url)])
+                         for f in d.key_facts]
+    profile.funding = Funding(
+        rounds=[FundingRound(year=r.year or None, round=r.round or None, amount=r.amount or None,
+                             investors=r.investors,
+                             sources=_source_for(r.source_page, page_urls, site_url))
+                for r in d.funding_rounds],
+        shareholders=[Shareholder(name=s.name, stake=s.stake or None,
+                                  sources=_source_for(s.source_page, page_urls, site_url))
+                      for s in d.shareholders],
+    )

@@ -120,7 +120,9 @@ def test_llm_receives_the_declared_facts_first(monkeypatch):
     chat = respx.post("http://localhost:11434/api/chat").respond(json={"done_reason": "stop", "message": {
         "content": json.dumps({"summary": "Acme Bakeries is a family baker in Leeds.",
                                "business_model": "B2C", "sectors": ["Food & Drink Retail"],
-                               "tags": ["bakery"], "target_markets": [], "products": [], "offices": []})}})
+                               "tags": ["bakery"], "target_markets": [], "products": [], "offices": [],
+                               "key_facts": [], "milestones": [], "funding_rounds": [],
+                               "shareholders": []})}})
     profile = CompanyProfile(query="x", identity=Identity(name="ACME BAKERIES LIMITED"))
     with Crawler(delay=0) as c:
         research_website(profile, crawler=c, user_url="https://acme.example/")

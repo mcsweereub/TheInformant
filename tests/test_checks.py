@@ -24,7 +24,8 @@ OLLAMA_SHOW = "http://localhost:11434/api/show"
 
 def extraction(**over) -> WebsiteExtraction:
     base = dict(summary="Planlogic provides ETRM software for LNG trading.", business_model="B2B",
-                sectors=["Energy & Utilities"], tags=[], target_markets=[], products=[], offices=[])
+                sectors=["Energy & Utilities"], tags=[], target_markets=[], products=[], offices=[],
+                key_facts=[], milestones=[], funding_rounds=[], shareholders=[])
     base.update(over)
     return WebsiteExtraction(**base)
 
@@ -148,3 +149,62 @@ def test_thin_tags_are_topped_up_from_terms_the_pages_repeat():
 
     enough = extraction(tags=["etrm", "lng", "energy trading"])
     assert finish(enough, "m", [], source_text=text).data.tags == ["energy trading", "etrm", "lng"]
+
+
+def test_history_entries_are_normalised_deduplicated_and_grounded():
+    from informant.llm.prompts import ExtractedFunding, ExtractedMilestone, ExtractedShareholder
+
+    def ms(year, event):
+        return ExtractedMilestone(year=year, event=event, source_page="https://x/")
+
+    text = ("Greggs was founded in 1939 in Gosforth. Greggs listed on the London Stock Exchange in 1984. "
+            "In 2023 Greggs opened its first drive-thru. Baillie Gifford holds a stake in Greggs.")
+    data = extraction(
+        milestones=[ms("2023", "Opened first drive-thru"), ms("c. 1939", "Founded in Gosforth"),
+                    ms("1984", "Listed on the London Stock Exchange"),
+                    ms("1984", "Listed on the London  Stock Exchange"),  # duplicate
+                    ms("1950", "Opened a shop on the moon"),  # year not in the text
+                    ms("unknown", "Something happened")],  # no year at all
+        funding_rounds=[ExtractedFunding(year="1984", round="IPO", amount="", investors=[],
+                                         source_page="x")],  # nothing to record
+        shareholders=[ExtractedShareholder(name="Baillie Gifford", stake="", source_page="x"),
+                      ExtractedShareholder(name="Imaginary Holdings", stake="9%", source_page="x")],
+        key_facts=["Greggs opened its first drive-thru in 2023.", "Greggs operates on Mars."])
+    notes: list[str] = []
+    d = finish(data, "m", notes, source_text=text).data
+    assert [(m.year, m.event) for m in d.milestones] == [
+        ("1939", "Founded in Gosforth"), ("1984", "Listed on the London Stock Exchange"),
+        ("2023", "Opened first drive-thru")]
+    assert d.funding_rounds == []
+    assert [s.name for s in d.shareholders] == ["Baillie Gifford"]
+    assert d.key_facts == ["Greggs opened its first drive-thru in 2023."]
+    joined = " | ".join(notes)
+    assert "milestone(s) not supported" in joined and "Imaginary Holdings" in joined
+
+
+def test_business_model_cross_checked_against_stated_customers():
+    bank = extraction(business_model="B2B",
+                      summary="Monzo is an online bank for individual consumers and small businesses.",
+                      target_markets=["UK residents", "sole traders"])
+    assert finish(bank, "m", []).data.business_model == "mixed"
+    bakery = extraction(business_model="B2B2C", summary="Greggs sells pasties to shoppers.",
+                        target_markets=["UK consumers"])
+    assert finish(bakery, "m", []).data.business_model == "B2C"
+    etrm = extraction(business_model="B2B", summary="Planlogic sells ETRM software to energy traders.",
+                      target_markets=["LNG trading companies"])
+    assert finish(etrm, "m", []).data.business_model == "B2B"  # no consumers named: unchanged
+    shop = extraction(business_model="marketplace", summary="Connects shoppers with retailers.")
+    assert finish(shop, "m", []).data.business_model == "marketplace"
+
+
+def test_milestone_year_taken_from_event_text_and_unknown_values_blanked():
+    from informant.llm.prompts import ExtractedFunding, ExtractedMilestone, ExtractedShareholder
+    data = extraction(
+        milestones=[ExtractedMilestone(year="2020", event="Reported its first annual profit for the "
+                                       "year ending March 2024", source_page="x")],
+        shareholders=[ExtractedShareholder(name="GIC", stake="unknown", source_page="x")],
+        funding_rounds=[ExtractedFunding(year="2024", round="unknown", amount="£500m",
+                                         investors=["GIC"], source_page="x")])
+    d = finish(data, "m", []).data
+    assert d.milestones[0].year == "2024"
+    assert d.shareholders[0].stake == "" and d.funding_rounds[0].round == ""
