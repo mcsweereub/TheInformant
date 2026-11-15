@@ -9,6 +9,7 @@ ready for a separate visualisation/categorisation program to consume.
 uv sync
 cp .env.example .env   # then paste your Companies House API key into .env
 uv run playwright install chromium   # optional (~150 MB): reads JavaScript-built websites
+winget install UB-Mannheim.TesseractOCR   # optional: OCR for scanned (PDF-only) accounts
 ```
 
 Get a free key at https://developer.company-information.service.gov.uk/
@@ -51,8 +52,21 @@ All of this is exact registry data: no LLM, no scraping, about 4 seconds per com
 - **Filed accounts** (`financials`): turnover, profit, net assets, cash and employees
   for the last 3-4 years, read from the figures tagged in the filed accounts (iXBRL).
   Small companies often file no profit and loss account, so turnover may be absent.
-  Larger companies and groups usually file a PDF only: then the profile says so
-  rather than guessing.
+- **PDF-only accounts** (large companies, groups, banks): Companies House stores these
+  as scanned images. The tool then reads the figures (turnover, profits, total and net
+  assets, cash, employees), principal activities, auditor, ultimate controlling party and
+  substantial shareholders from either:
+  1. the company's own annual report, a text PDF found through its website, investor
+     or corporate site, sitemap or Wikipedia references, and accepted only if it names
+     the company and the exact year-end date; or
+  2. an OCR of the filed scan (needs Tesseract): a quick pass over every page finds the
+     statements, which are then read at full detail.
+
+  The LLM copies figures exactly as printed; code converts the units and drops any
+  figure that doesn't appear on the pages. Each year records how it was read
+  (`method`: `ixbrl`, `annual_report` or `ocr`); OCR can misread a digit, so check
+  important OCR figures against the document. A large report takes a few minutes to
+  find and read (Monzo's is 59 MB), plus two LLM calls. `--no-pdf-accounts` skips it.
 - **Share capital** (`capital`): allotments, buybacks and cancellations. An allotment
   means new shares were issued, usually a funding round or a share scheme.
 - **Charges** (`charges`): mortgages and other security, with the lenders' names and

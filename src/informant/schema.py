@@ -18,7 +18,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-SCHEMA_VERSION = "0.9.0"
+SCHEMA_VERSION = "0.10.0"
 
 SourceName = Literal[
     "companies_house",
@@ -185,15 +185,25 @@ class FinancialPeriod(BaseModel):
     total_assets_less_current_liabilities: float | None = None
     net_assets: float | None = None
     equity: float | None = None
+    total_assets: float | None = None
     employees: int | None = None  # average number during the period
     filed_on: date | None = None  # when the accounts these figures came from were filed
     source_url: str | None = None
+    # How the figures were read: "ixbrl" (exact tagged figures), "annual_report" (the
+    # company's own text PDF, read by the LLM) or "ocr" (a scanned filing, OCR then LLM;
+    # occasional digit errors are possible).
+    method: Literal["ixbrl", "annual_report", "ocr"] | None = None
 
 
 class Financials(Sourced):
     """Figures from filed accounts, newest period first."""
 
     periods: list[FinancialPeriod] = Field(default_factory=list)
+    latest_filing_format: Literal["ixbrl", "pdf"] | None = None  # how the newest accounts were filed
+    principal_activities: str | None = None  # as stated in the accounts
+    auditor: str | None = None
+    ultimate_controlling_party: str | None = None  # as stated in the accounts
+    document_url: str | None = None  # the document the PDF figures came from
     notes: list[str] = Field(default_factory=list)  # e.g. accounts filed as PDF only
 
 

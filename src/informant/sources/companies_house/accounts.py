@@ -183,12 +183,14 @@ def fetch_financials(client: CompaniesHouseClient, number: str, cache=None,
                 continue
             if cache is not None:
                 cache.put(meta_url, {"company_number": number, "made_up": made_up, "periods": periods})
+        if result.latest_filing_format is None:
+            result.latest_filing_format = "ixbrl" if periods else "pdf"
         if not periods:
             pdf_only.append(str(made_up))
             continue
         for raw in periods:
             try:
-                period = FinancialPeriod(**raw, filed_on=item.get("date"),
+                period = FinancialPeriod(**raw, filed_on=item.get("date"), method="ixbrl",
                                          source_url=filing_document_url(number, item))
             except ValueError:
                 continue

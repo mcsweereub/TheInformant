@@ -158,6 +158,10 @@ def lookup(
     wikipedia: bool | None = typer.Option(
         None, "--wikipedia/--no-wikipedia",
         help="Look up Wikipedia/Wikidata (needs INFORMANT_CONTACT) [default: INFORMANT_WIKIPEDIA, on]."),
+    pdf_accounts: bool | None = typer.Option(
+        None, "--pdf-accounts/--no-pdf-accounts",
+        help="When accounts are filed as PDF only, read figures from the company's annual report or "
+        "an OCR of the scan (needs an LLM) [default: INFORMANT_PDF_ACCOUNTS, on]."),
     json_mode: bool = JSON_OPT,
     progress: bool = typer.Option(False, "--progress", help="Write JSON progress events to stderr."),
 ) -> None:
@@ -175,7 +179,8 @@ def lookup(
         kwargs = dict(website=website, web=web, llm=llm, max_pages=max_pages, filings=filings,
                       browser=browser, llm_strategy=llm_strategy, use_cache=cache,
                       refresh=refresh, registry=registry, news=news,
-                      news_days=news_days, wikipedia=wikipedia)
+                      news_days=news_days, wikipedia=wikipedia,
+                      pdf_accounts=pdf_accounts)
 
         if progress or json_mode:
             callback = _write_progress_line if progress else None
@@ -253,12 +258,18 @@ def _print_registry(profile: CompanyProfile) -> None:
     fin, own = profile.financials, profile.ownership
     if fin.periods:
         table = Table("Year end", "Turnover", "Profit", "Net assets", "Cash", "Employees",
-                      title="Filed accounts")
+                      "Read from", title="Filed accounts")
+        sources = {"ixbrl": "tagged filing", "annual_report": "annual report", "ocr": "OCR of scan"}
         for p in fin.periods[:4]:
             table.add_row(str(p.period_end), _money(p.turnover), _money(p.profit_loss),
                           _money(p.net_assets), _money(p.cash),
-                          str(p.employees) if p.employees is not None else "n/a")
+                          str(p.employees) if p.employees is not None else "n/a",
+                          sources.get(p.method or "", ""))
         out.print(table)
+    for label, value in (("Activities", fin.principal_activities), ("Auditor", fin.auditor),
+                         ("Ultimate controlling party", fin.ultimate_controlling_party)):
+        if value:
+            out.print(f"{label}: {value}", highlight=False)
     for note in fin.notes:
         out.print(f"  [dim]accounts: {note}[/dim]")
 

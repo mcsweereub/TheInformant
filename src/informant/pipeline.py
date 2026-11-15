@@ -14,11 +14,13 @@ import os
 from dataclasses import dataclass, field
 
 from .cache import AccountsCache, LlmCache, PageCache, cache_enabled
-from .errors import ConfigError, NotFoundError
+from .errors import ConfigError, InformantError, NotFoundError
+from .llm.accounts import extract_accounts
+from .sources.accounts_pdf import get_accounts_document
 from .llm import judge_headlines, make_complete
 from .llm.news import SENTIMENT_SCORES
 from .progress import ProgressFn, emit
-from .schema import CompanyProfile, News, NewsItem, Source
+from .schema import CompanyProfile, FinancialPeriod, News, NewsItem, Shareholder, Source
 from .sources.companies_house import (
     CompaniesHouseClient,
     SearchHit,
@@ -78,6 +80,7 @@ def research_company(
     registry: str | None = None,
     news: bool | None = None,
     wikipedia: bool | None = None,
+    pdf_accounts: bool | None = None,
     news_days: int | None = None,
     progress: ProgressFn | None = None,
     ch_client: CompaniesHouseClient | None = None,
@@ -163,6 +166,17 @@ def research_company(
         if not profile.identity.description:
             profile.identity.description = summary_sentences(profile.wikipedia.summary)
 
+    if pdf_accounts is None:
+        pdf_accounts = os.environ.get("INFORMANT_PDF_ACCOUNTS", "on").strip().lower() not in _OFF
+    if pdf_accounts and depth == "full":
+        if research_pdf_accounts(profile, use_llm=llm, use_web=web,
+                                 page_cache=PageCache(refresh=refresh) if caching else None,
+                                 accounts_cache=AccountsCache() if caching else None,
+                                 llm_cache=LlmCache() if caching else None, progress=progress):
+            add_risk_flags(profile, ch_data.raw)  # the new figures may change the flags
+    else:
+        emit(progress, "accounts_pdf", "skipped", "PDF accounts reading disabled")
+
     if news is None:
         news = os.environ.get("INFORMANT_NEWS", "on").strip().lower() not in _OFF
     if news:
@@ -176,6 +190,87 @@ def research_company(
         emit(progress, "news", "skipped", "News search disabled")
 
     return LookupResult(profile=profile, matched_by=matched_by, alternatives=alternatives)
+
+
+def research_pdf_accounts(profile: CompanyProfile, *, use_llm: bool = True, use_web: bool = True,
+                          page_cache: PageCache | None = None, accounts_cache=None,
+                          llm_cache: LlmCache | None = None,
+                          progress: ProgressFn | None = None) -> bool:
+    """When the newest accounts are PDF-only, read their figures and facts from the
+    company's own annual report or, failing that, an OCR of the filed scan.
+    Returns True if anything was added."""
+    fin = profile.financials
+    if fin.latest_filing_format != "pdf":
+        emit(progress, "accounts_pdf", "skipped", "Accounts are machine-readable or absent")
+        return False
+    if not use_llm:
+        emit(progress, "accounts_pdf", "skipped", "Reading PDF accounts needs an LLM")
+        return False
+    ident = profile.identity
+    emit(progress, "accounts_pdf", "started", "Reading the PDF accounts")
+
+    def step(message: str) -> None:
+        emit(progress, "accounts_pdf", "progress", message)
+
+    seeds = [(r.url, r.title or r.text) for r in profile.wikipedia.references if r.url]
+    try:
+        with Crawler(cache=page_cache) as crawler, \
+                CompaniesHouseClient(os.environ.get("COMPANIES_HOUSE_API_KEY", "")) as ch:
+            if use_web and profile.website.url:
+                for page_meta in profile.website.pages[:12]:
+                    page = crawler.fetch(page_meta.url, page_meta.kind, [])  # cached: no request
+                    if page is not None:
+                        seeds.extend(page.links)
+            doc = get_accounts_document(ch, ident.company_number or "", ident.name,
+                                        crawler=crawler if use_web else None,
+                                        website=profile.website.url, seed_links=seeds,
+                                        cache=accounts_cache, progress=step)
+    except InformantError as e:
+        fin.notes.append(f"PDF accounts could not be read: {e}")
+        emit(progress, "accounts_pdf", "failed", str(e))
+        return False
+    if doc is None or not doc.pages:
+        fin.notes.extend(doc.notes if doc else [])
+        emit(progress, "accounts_pdf", "failed", doc.notes[-1] if doc and doc.notes else "Nothing to read")
+        return False
+
+    step(f"Reading figures from {len(doc.pages)} page(s) of the "
+         + ("annual report" if doc.method == "annual_report" else "scanned filing"))
+    complete, _ = make_complete(cache=llm_cache)
+    result = extract_accounts(ident.name, doc.pages, doc.made_up, complete)
+
+    known = {p.period_end for p in fin.periods}
+    added = 0
+    for raw in result.periods:
+        try:
+            period = FinancialPeriod(**raw, filed_on=doc.filed_on, source_url=doc.url, method=doc.method)
+        except ValueError:
+            continue
+        if period.period_end not in known:  # exact iXBRL figures always win
+            fin.periods.append(period)
+            known.add(period.period_end)
+            added += 1
+    fin.periods.sort(key=lambda p: p.period_end, reverse=True)
+    fin.principal_activities = fin.principal_activities or result.principal_activities
+    fin.auditor = fin.auditor or result.auditor
+    fin.ultimate_controlling_party = fin.ultimate_controlling_party or result.ultimate_controlling_party
+    fin.document_url = doc.url
+    how = ("the company's annual report" if doc.method == "annual_report"
+           else "an OCR of the scanned filing (check important figures against the document)")
+    fin.notes = [n for n in fin.notes if "PDF only" not in n]
+    fin.notes.extend(doc.notes + result.notes)
+    if added:
+        fin.notes.append(f"{added} year(s) of figures read from {how}, pages "
+                         + ", ".join(str(p.number) for p in doc.pages))
+    holders = {s.name.lower() for s in profile.funding.shareholders}
+    for name, stake in result.shareholders:
+        if name.lower() not in holders:
+            profile.funding.shareholders.append(
+                Shareholder(name=name, stake=stake, sources=[Source(name="other", url=doc.url)]))
+            holders.add(name.lower())
+    emit(progress, "accounts_pdf", "done", f"{added} year(s) of figures", method=doc.method,
+         periods=added, url=doc.url)
+    return bool(added or result.principal_activities or result.shareholders)
 
 
 def research_wikipedia(profile: CompanyProfile, *, cache: PageCache | None = None,

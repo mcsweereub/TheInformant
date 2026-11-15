@@ -19,5 +19,6 @@ def no_cache_by_default(monkeypatch):
     # Wikipedia likewise (tested in test_wikipedia.py); and never send the user's contact
     # details from tests, even if a test loads the real .env.
     monkeypatch.setenv("INFORMANT_WIKIPEDIA", "off")
+    monkeypatch.setenv("INFORMANT_PDF_ACCOUNTS", "off")  # tested in test_accounts_pdf.py
     monkeypatch.delenv("INFORMANT_CONTACT", raising=False)
     monkeypatch.delenv("GUARDIAN_API_KEY", raising=False)
