@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 import httpx
 
@@ -97,7 +98,10 @@ def discover_website(
     company_number: str | None,
     postcode: str | None,
     user_url: str | None = None,
+    search=None,
 ) -> Discovery:
+    """`search` (a web_search.WebSearch) is the last resort, used only when every free
+    method has failed."""
     if user_url:
         return Discovery(url=user_url, via="user", confidence="high",
                          reasons=["supplied by user"])
@@ -141,5 +145,50 @@ def discover_website(
             return Discovery(url=page.url, via="domain_guess", confidence="high",
                              reasons=reasons, notes=notes)
         notes.append(f"{page.url} exists but its homepage doesn't show the company number; ignored")
+
+    if search is not None:
+        found = _discover_by_search(crawler, search, company_name, company_number, postcode, notes)
+        if found is not None:
+            return found
     notes.append("could not find the company website; pass --website to set it")
     return Discovery(url=None, via=None, confidence=None, notes=notes)
+
+
+# Sites that are about companies, not run by them: never taken as the official website.
+_DIRECTORIES = (
+    "company-information.service.gov.uk", "gov.uk", "wikipedia.org", "wikidata.org",
+    "opencorporates.com", "endole.co.uk", "companycheck.co.uk", "bizdb.co.uk", "dnb.com",
+    "bloomberg.com", "crunchbase.com", "zoominfo.com", "glassdoor", "indeed.", "trustpilot.com",
+    "yell.com", "companieslist.co.uk", "find-and-update", "linkedin.com", "facebook.com",
+    "twitter.com", "x.com", "instagram.com", "youtube.com", "annualreports.com",
+)
+
+
+def _discover_by_search(crawler, search, company_name: str, company_number: str | None,
+                        postcode: str | None, notes: list[str]) -> Discovery | None:
+    """Search for the company and test the sites that come back. A site is accepted
+    on the same evidence as a guessed domain: its homepage shows the company number
+    or postcode (high), or names the company in its title (medium)."""
+    core = core_name(company_name)
+    query = f'"{core}" {company_number}' if company_number else f'"{core}" official website'
+    results = search.search(query, max_results=8)
+    hosts: list[str] = []
+    for r in results:
+        host = urlparse(r.url).netloc.lower()
+        if host and host not in hosts and not any(d in host for d in _DIRECTORIES):
+            hosts.append(host)
+    best: Discovery | None = None
+    for host in hosts[:4]:
+        page = crawler.probe(f"https://{host}/")
+        if page is None or page.status_code != 200 or not page.text:
+            continue
+        confidence, reasons = verify_ownership(
+            [page], company_number=company_number, company_name=company_name, postcode=postcode)
+        reasons = reasons + ["found by web search"]
+        if confidence == "high":
+            return Discovery(url=page.url, via="search", confidence="high", reasons=reasons, notes=notes)
+        if confidence == "medium" and best is None:
+            best = Discovery(url=page.url, via="search", confidence="medium", reasons=reasons, notes=notes)
+    if best is None and results:
+        notes.append("web search found no site that could be confirmed as the company's")
+    return best

@@ -18,7 +18,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-SCHEMA_VERSION = "0.10.0"
+SCHEMA_VERSION = "0.11.0"
 
 SourceName = Literal[
     "companies_house",
@@ -404,10 +404,25 @@ class KeyFact(Sourced):
     text: str
 
 
+class WebMention(BaseModel):
+    """A page elsewhere on the web that mentions the company (from web search)."""
+
+    title: str
+    url: str
+    snippet: str | None = None
+
+
+class WebMentions(Sourced):
+    query: str | None = None
+    items: list[WebMention] = Field(default_factory=list)
+    searches_used: int = 0  # real API calls this lookup (cached repeats are free)
+    notes: list[str] = Field(default_factory=list)
+
+
 class Website(Sourced):
     url: str | None = None
     structured: StructuredData = Field(default_factory=StructuredData)
-    discovered_via: Literal["user", "wikidata", "domain_guess"] | None = None
+    discovered_via: Literal["user", "wikidata", "domain_guess", "search"] | None = None
     confidence: Literal["high", "medium", "low"] | None = None
     verification: list[str] = Field(default_factory=list)  # why we think it's theirs
     title: str | None = None
@@ -496,6 +511,7 @@ class CompanyProfile(BaseModel):
     history: list[Milestone] = Field(default_factory=list)  # oldest first
     key_facts: list[KeyFact] = Field(default_factory=list)
     funding: Funding = Field(default_factory=Funding)
+    web_mentions: WebMentions = Field(default_factory=WebMentions)
     hiring: Hiring = Field(default_factory=Hiring)
 
     def to_json(self) -> str:

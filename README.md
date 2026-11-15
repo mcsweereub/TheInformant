@@ -164,6 +164,24 @@ Every entry is checked against the source text: a milestone's year and most of i
 must appear there, investors and shareholders must be named there, and duplicates are
 merged. Each entry records the page it came from.
 
+## Web search
+
+With `TAVILY_API_KEY` set (free key from https://tavily.com, about 1,000 searches a
+month), web search fills gaps, at most 4 searches per lookup (`INFORMANT_SEARCH_MAX`):
+
+- **Mentions** (`web_mentions`): one search for what other sites say about the company
+  (trade press, directories, partner announcements). The snippets go to the LLM with the
+  other material. Social networks, people-finder sites, the company's own site, Wikipedia
+  and Companies House are left out.
+- **A missing website**: when domain guessing and Wikidata fail, it searches for the
+  company's name and number, and accepts a site only on the usual evidence (the company
+  number or postcode on its homepage, or its name in the title).
+- **An unlinked annual report**: when PDF-only accounts need the report and the site
+  doesn't link it, it searches for it. The usual checks still apply, including robots.txt.
+
+Searches are cached for 7 days, so re-running a company costs nothing. `--no-search`
+skips web search. Search engines' own result pages are never scraped.
+
 ## News
 
 Recent headlines that name the company (default: the last 90 days, up to 20 articles).
@@ -238,6 +256,7 @@ always present (empty when not yet populated), and every section carries
 | tech_stack       | website                | done    |
 | wikipedia        | Wikipedia + Wikidata   | done    |
 | news             | Bing, GDELT, Guardian  | done    |
+| web_mentions     | Tavily web search      | done    |
 | hiring           | careers page / ATS     | planned |
 
 ## Using TheInformant from other programs

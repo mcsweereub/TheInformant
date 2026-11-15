@@ -20,7 +20,16 @@ from .sources.accounts_pdf import get_accounts_document
 from .llm import judge_headlines, make_complete
 from .llm.news import SENTIMENT_SCORES
 from .progress import ProgressFn, emit
-from .schema import CompanyProfile, FinancialPeriod, News, NewsItem, Shareholder, Source
+from .schema import (
+    CompanyProfile,
+    FinancialPeriod,
+    News,
+    NewsItem,
+    Shareholder,
+    Source,
+    WebMention,
+    WebMentions,
+)
 from .sources.companies_house import (
     CompaniesHouseClient,
     SearchHit,
@@ -33,7 +42,11 @@ from .sources.news import DEFAULT_DAYS as DEFAULT_NEWS_DAYS
 from .sources.news import fetch_news
 from .sources.website.research import summary_sentences
 from .sources.wikipedia import fetch_wikipedia
+from .sources.news import mentions, search_names
+from .sources.web_search import PEOPLE_AND_SOCIAL_DOMAINS, WebSearch
+from .sources.website.extract import site_host
 from .sources.website.fetch import Crawler
+from .sources.website.parse import Page
 from .sources.website.research import extract_from_material, research_website
 
 REGISTRY_DEPTHS = ("full", "basic")
@@ -81,6 +94,7 @@ def research_company(
     news: bool | None = None,
     wikipedia: bool | None = None,
     pdf_accounts: bool | None = None,
+    web_search: bool | None = None,
     news_days: int | None = None,
     progress: ProgressFn | None = None,
     ch_client: CompaniesHouseClient | None = None,
@@ -140,6 +154,19 @@ def research_company(
     else:
         emit(progress, "wikipedia", "skipped", "Wikipedia disabled")
 
+    # Web search fills gaps (mentions, a missing website, an unlinked annual report),
+    # within a small per-lookup budget. Only if TAVILY_API_KEY is set.
+    search = None
+    if web_search is None or web_search:
+        search = WebSearch.from_env(cache=PageCache(refresh=refresh) if caching else None)
+    mentions_material = None
+    if search is not None:
+        mentions_material = research_web_mentions(profile, search, progress=progress)
+    else:
+        emit(progress, "web_search", "skipped",
+             "Web search disabled" if web_search is False else "No TAVILY_API_KEY set")
+    extra = [m for m in (wiki_material, mentions_material) if m is not None]
+
     if web:
         own_crawler = crawler is None
         crawler = crawler or Crawler(
@@ -149,16 +176,16 @@ def research_company(
                              max_pages=max_pages, use_llm=llm, llm_strategy=llm_strategy,
                              llm_cache=LlmCache() if caching else None,
                              progress=progress,
-                             extra_material=[wiki_material] if wiki_material else None)
+                             extra_material=extra, search=search)
         finally:
             if own_crawler:
                 crawler.close()
     else:
         for stage in ("website_discovery", "crawl", "extract"):
             emit(progress, stage, "skipped", "Website research disabled")
-        if llm and wiki_material is not None:
-            # No website, but the Wikipedia article is still worth reading.
-            extract_from_material(profile, [wiki_material], llm_strategy=llm_strategy,
+        if llm and extra:
+            # No website, but the Wikipedia article and web mentions are still worth reading.
+            extract_from_material(profile, extra, llm_strategy=llm_strategy,
                                   llm_cache=LlmCache() if caching else None, progress=progress)
         else:
             emit(progress, "llm", "skipped",
@@ -172,7 +199,8 @@ def research_company(
         if research_pdf_accounts(profile, use_llm=llm, use_web=web,
                                  page_cache=PageCache(refresh=refresh) if caching else None,
                                  accounts_cache=AccountsCache() if caching else None,
-                                 llm_cache=LlmCache() if caching else None, progress=progress):
+                                 llm_cache=LlmCache() if caching else None, progress=progress,
+                                 search=search):
             add_risk_flags(profile, ch_data.raw)  # the new figures may change the flags
     else:
         emit(progress, "accounts_pdf", "skipped", "PDF accounts reading disabled")
@@ -189,13 +217,46 @@ def research_company(
     else:
         emit(progress, "news", "skipped", "News search disabled")
 
+    if search is not None:
+        profile.web_mentions.searches_used = search.used
+        profile.web_mentions.notes.extend(n for n in search.notes
+                                          if n not in profile.web_mentions.notes)
     return LookupResult(profile=profile, matched_by=matched_by, alternatives=alternatives)
+
+
+def research_web_mentions(profile: CompanyProfile, search: WebSearch, *,
+                          progress: ProgressFn | None = None):
+    """One search for what other sites say about the company. Fills profile.web_mentions
+    and returns the snippets as LLM material (or None). Social networks, people-finder
+    sites, the company's own site, Wikipedia and Companies House are left out."""
+    ident = profile.identity
+    names = search_names(ident.name, ident.website)
+    emit(progress, "web_search", "started", "Searching the web for mentions")
+    exclude = list(PEOPLE_AND_SOCIAL_DOMAINS) + ["wikipedia.org", "company-information.service.gov.uk"]
+    if ident.website:
+        exclude.append(site_host(ident.website))
+    query = " ".join(f'"{n}"' for n in names[:1]) + (" company" if names else "")
+    results = search.search(query or ident.name, max_results=10, exclude_domains=exclude)
+    section = WebMentions(query=query, sources=[Source(name="other", url="https://tavily.com")])
+    for r in results:
+        text = f"{r.title} {r.content}"
+        if not mentions(text, names) or any(d in r.url for d in PEOPLE_AND_SOCIAL_DOMAINS):
+            continue
+        section.items.append(WebMention(title=r.title, url=r.url, snippet=r.content[:600] or None))
+    profile.web_mentions = section
+    emit(progress, "web_search", "done", f"{len(section.items)} mention(s)", mentions=len(section.items))
+    if not section.items:
+        return None
+    lines = [f"{m.title} ({m.url}): {m.snippet or ''}" for m in section.items]
+    return Page(url=section.items[0].url, kind="web_search", status_code=200,
+                title="What other websites say about the company (web search snippets)",
+                text="\n".join(lines))
 
 
 def research_pdf_accounts(profile: CompanyProfile, *, use_llm: bool = True, use_web: bool = True,
                           page_cache: PageCache | None = None, accounts_cache=None,
                           llm_cache: LlmCache | None = None,
-                          progress: ProgressFn | None = None) -> bool:
+                          progress: ProgressFn | None = None, search=None) -> bool:
     """When the newest accounts are PDF-only, read their figures and facts from the
     company's own annual report or, failing that, an OCR of the filed scan.
     Returns True if anything was added."""
@@ -224,7 +285,7 @@ def research_pdf_accounts(profile: CompanyProfile, *, use_llm: bool = True, use_
             doc = get_accounts_document(ch, ident.company_number or "", ident.name,
                                         crawler=crawler if use_web else None,
                                         website=profile.website.url, seed_links=seeds,
-                                        cache=accounts_cache, progress=step)
+                                        cache=accounts_cache, progress=step, search=search)
     except InformantError as e:
         fin.notes.append(f"PDF accounts could not be read: {e}")
         emit(progress, "accounts_pdf", "failed", str(e))

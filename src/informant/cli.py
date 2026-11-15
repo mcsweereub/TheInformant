@@ -162,6 +162,10 @@ def lookup(
         None, "--pdf-accounts/--no-pdf-accounts",
         help="When accounts are filed as PDF only, read figures from the company's annual report or "
         "an OCR of the scan (needs an LLM) [default: INFORMANT_PDF_ACCOUNTS, on]."),
+    web_search: bool | None = typer.Option(
+        None, "--search/--no-search",
+        help="Use web search (Tavily, needs TAVILY_API_KEY) for mentions and to find a missing "
+        "website or annual report [default: INFORMANT_SEARCH, on]."),
     json_mode: bool = JSON_OPT,
     progress: bool = typer.Option(False, "--progress", help="Write JSON progress events to stderr."),
 ) -> None:
@@ -180,7 +184,7 @@ def lookup(
                       browser=browser, llm_strategy=llm_strategy, use_cache=cache,
                       refresh=refresh, registry=registry, news=news,
                       news_days=news_days, wikipedia=wikipedia,
-                      pdf_accounts=pdf_accounts)
+                      pdf_accounts=pdf_accounts, web_search=web_search)
 
         if progress or json_mode:
             callback = _write_progress_line if progress else None
@@ -232,6 +236,7 @@ def lookup(
             out.print(f"  [italic]{profile.identity.description}[/italic]", highlight=False)
         _print_history_and_funding(profile)
         _print_news(profile)
+        _print_mentions(profile)
         active = sum(1 for o in profile.people.officers if o.active)
         out.print(
             f"[green]Wrote {path}[/green]  "
@@ -331,6 +336,17 @@ def _print_history_and_funding(profile: CompanyProfile) -> None:
         out.print(f"Shareholders mentioned: {holders}", highlight=False)
     if profile.key_facts:
         out.print(f"[dim]{len(profile.key_facts)} key facts in the JSON file[/dim]")
+
+
+def _print_mentions(profile: CompanyProfile) -> None:
+    wm = profile.web_mentions
+    if not (wm.items or wm.notes):
+        return
+    out.print(f"Web mentions: {len(wm.items)} (web searches used this lookup: {wm.searches_used})")
+    for m in wm.items[:5]:
+        out.print(f"  {m.title} [dim]({m.url})[/dim]", highlight=False)
+    for note in wm.notes:
+        out.print(f"  [dim]search: {note}[/dim]")
 
 
 def _print_news(profile: CompanyProfile) -> None:

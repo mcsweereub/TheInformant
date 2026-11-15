@@ -20,5 +20,9 @@ def no_cache_by_default(monkeypatch):
     # details from tests, even if a test loads the real .env.
     monkeypatch.setenv("INFORMANT_WIKIPEDIA", "off")
     monkeypatch.setenv("INFORMANT_PDF_ACCOUNTS", "off")  # tested in test_accounts_pdf.py
+    # Web search spends the user's Tavily allowance: never from tests (test_web_search.py
+    # uses fakes).
+    monkeypatch.setenv("INFORMANT_SEARCH", "off")
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.delenv("INFORMANT_CONTACT", raising=False)
     monkeypatch.delenv("GUARDIAN_API_KEY", raising=False)

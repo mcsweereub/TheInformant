@@ -235,3 +235,18 @@ def test_extract_accounts_handles_a_failed_model_call():
         return Completion(None, "ollama/test", ["could not reach Ollama"])
     r = extract_accounts("X", [PdfPage(1, INCOME, ["income_statement"])], None, broken)
     assert r.periods == [] and "figures not read" in r.notes[0]
+
+
+def test_activities_need_an_activities_page_and_stakes_need_a_figure():
+    board_page = PdfPage(1, "Board activities: strategy, culture, supply chain. "
+                         "Silchester International Investors LLP 5.00% J.P. Morgan Securities Ple",
+                         ["shareholders"])
+    facts = {"principal_activities": "Strategy, culture and supply chain.", "auditor": "",
+             "ultimate_controlling_party": "", "employees": "",
+             "substantial_shareholders": [
+                 {"name": "Silchester International Investors LLP", "stake": "notable"},
+                 {"name": "J.P. Morgan Securities Ple", "stake": "5.15%"}]}
+    r = extract_accounts("GREGGS PLC", [board_page], None, fake_complete({"years": []}, facts))
+    assert r.principal_activities is None  # no "principal activities" page was read
+    assert r.shareholders == [("Silchester International Investors LLP", None),
+                              ("J.P. Morgan Securities plc", "5.15%")]

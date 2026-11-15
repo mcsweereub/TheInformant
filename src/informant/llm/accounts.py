@@ -130,6 +130,17 @@ def parse_date(text: str, fallback: date | None) -> date | None:
     return fallback
 
 
+_OCR_SUFFIXES = {"Ple": "plc", "PIc": "plc", "Pic": "plc", "LLF": "LLP", "Lid": "Ltd", "Ltd.": "Ltd"}
+
+
+def fix_ocr_name(name: str) -> str:
+    """Common OCR slips in company suffixes ("J.P. Morgan Securities Ple" -> "plc")."""
+    words = name.split()
+    if words and words[-1] in _OCR_SUFFIXES:
+        words[-1] = _OCR_SUFFIXES[words[-1]]
+    return " ".join(words)
+
+
 def _pages_text(pages, topics: tuple[str, ...] | None) -> str:
     chosen = [p for p in pages if topics is None or set(p.topics) & set(topics)] or list(pages)
     parts, total = [], 0
@@ -210,7 +221,11 @@ def extract_accounts(company_name: str, pages, made_up: date | None,
                 words = re.findall(r"[a-z]{3,}", v.lower())
                 return v if words and sum(w in tokens for w in words) / len(words) >= share else None
 
-            result.principal_activities = grounded(d.principal_activities, 0.6)
+            # Only trust a stated activity when a "principal activities" page was read;
+            # otherwise the model improvises from whatever page it was given.
+            has_activities_page = any("activities" in p.topics for p in pages)
+            result.principal_activities = (grounded(d.principal_activities, 0.6)
+                                           if has_activities_page else None)
             result.auditor = grounded(d.auditor, 1.0)
             result.ultimate_controlling_party = grounded(d.ultimate_controlling_party, 1.0)
             employees = parse_figure(d.employees)
@@ -219,6 +234,7 @@ def extract_accounts(company_name: str, pages, made_up: date | None,
             for s in d.substantial_shareholders:
                 name = grounded(s.name, 1.0)
                 if name:
-                    stake = s.stake.strip() or None
-                    result.shareholders.append((name, stake if stake and stake.lower() != "unknown" else None))
+                    # A stake must be a figure ("5.15%"), not a word like "notable".
+                    stake = s.stake.strip() if re.search(r"\d", s.stake or "") else None
+                    result.shareholders.append((fix_ocr_name(name), stake))
     return result

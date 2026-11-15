@@ -376,7 +376,7 @@ def ocr_document(data: bytes, *, cache=None, cache_key: str = "", workers: int |
 def get_accounts_document(client: CompaniesHouseClient, number: str, company_name: str, *,
                           crawler=None, website: str | None = None,
                           seed_links: list[tuple[str, str]] | None = None, cache=None,
-                          progress=None) -> AccountsDocument | None:
+                          progress=None, search=None) -> AccountsDocument | None:
     """The pages of the latest accounts worth reading, or None if the latest accounts
     are already machine-readable (iXBRL) or nothing could be read."""
     item = latest_accounts_filing(client, number)
@@ -396,6 +396,16 @@ def get_accounts_document(client: CompaniesHouseClient, number: str, company_nam
                                    or "Mozilla/5.0 (compatible; informant/0.1; personal company research)"}) as http:
             found = find_annual_report(crawler, company_name=company_name, made_up=made_up,
                                        website=website, seed_links=seed_links or [], http=http)
+            if found is None and search is not None:
+                # Not linked from anywhere we looked: ask web search for it.
+                if progress:
+                    progress("Searching the web for the annual report")
+                results = search.search(f'"{core_name(company_name)}" annual report {made_up.year}',
+                                        max_results=8)
+                if results:
+                    found = find_annual_report(
+                        crawler, company_name=company_name, made_up=made_up, website=website,
+                        seed_links=[(r.url, r.title) for r in results], http=http)
         if found is not None:
             url, texts = found
             return AccountsDocument("annual_report", url, made_up, item.get("date"), len(texts),

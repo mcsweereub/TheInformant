@@ -69,6 +69,7 @@ def research_website(
     llm_cache: LlmCache | None = None,
     progress: ProgressFn | None = None,
     extra_material: list[Page] | None = None,
+    search=None,
 ) -> CompanyProfile:
     """Fill the website-derived sections of `profile` in place and return it.
 
@@ -101,6 +102,7 @@ def research_website(
         company_number=ident.company_number,
         postcode=postcode,
         user_url=user_url,
+        search=search,
     )
     site = Website(
         url=found.url,
