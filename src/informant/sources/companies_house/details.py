@@ -42,6 +42,9 @@ def add_registry_details(client: CompaniesHouseClient, profile: CompanyProfile, 
 
     profile.financials = step("Reading filed accounts", Financials,
                               lambda: fetch_financials(client, number, accounts_cache))
+    if profile.financials._political_statement:
+        pd = profile.political_donations
+        pd.accounts_statement, pd.accounts_statement_url = profile.financials._political_statement
     profile.capital = step("Share capital filings", Capital, lambda: fetch_capital(client, number))
     # Always ask: the profile's has_charges field is unreliable (false for companies
     # that do have charges registered).

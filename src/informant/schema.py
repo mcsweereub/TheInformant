@@ -16,9 +16,9 @@ import datetime as dt
 from datetime import date, datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
-SCHEMA_VERSION = "0.12.0"
+SCHEMA_VERSION = "0.14.0"
 
 SourceName = Literal[
     "companies_house",
@@ -26,6 +26,12 @@ SourceName = Literal[
     "news",
     "jobs",
     "llm_extraction",
+    "gleif",
+    "contracts_finder",
+    "dns",
+    "certificates",
+    "wayback",
+    "electoral_commission",
     "other",
 ]
 
@@ -205,6 +211,9 @@ class Financials(Sourced):
     ultimate_controlling_party: str | None = None  # as stated in the accounts
     document_url: str | None = None  # the document the PDF figures came from
     notes: list[str] = Field(default_factory=list)  # e.g. accounts filed as PDF only
+    # (statement, document URL) about political donations, found while reading the
+    # accounts; the pipeline moves it to political_donations. Not part of the output.
+    _political_statement: tuple[str, str | None] | None = PrivateAttr(default=None)
 
 
 # --- share capital, charges, ownership, related companies, risk ----------------
@@ -433,6 +442,26 @@ class WebMentions(Sourced):
     notes: list[str] = Field(default_factory=list)
 
 
+class SitePost(BaseModel):
+    """A post from the site's own WordPress feed (news, blog)."""
+
+    title: str
+    url: str | None = None
+    published_on: date | None = None
+    excerpt: str | None = None
+
+
+class ShopCatalogue(BaseModel):
+    """A summary of the site's Shopify product feed."""
+
+    products_listed: int = 0  # products in the feed (the feed lists at most 250)
+    product_types: dict[str, int] = Field(default_factory=dict)  # type -> number of products
+    vendors: dict[str, int] = Field(default_factory=dict)  # brand -> number of products
+    price_min: float | None = None  # in the shop's own currency
+    price_max: float | None = None
+    newest: list[str] = Field(default_factory=list)  # titles of the newest products
+
+
 class Website(Sourced):
     url: str | None = None
     structured: StructuredData = Field(default_factory=StructuredData)
@@ -448,6 +477,11 @@ class Website(Sourced):
     business_model: str | None = None  # B2B / B2C / B2B2C / marketplace ... (LLM)
     target_markets: list[str] = Field(default_factory=list)  # (LLM)
     llm_model: str | None = None  # which model produced the LLM fields, e.g. ollama/gemma4:12b
+    # Analytics and tag IDs in the pages (GTM-..., G-..., UA-..., meta-pixel:...). Sites
+    # sharing an ID are usually run by the same organisation (see index.json).
+    analytics_ids: list[str] = Field(default_factory=list)
+    posts: list[SitePost] = Field(default_factory=list)  # newest first, from /wp-json
+    shop: ShopCatalogue | None = None  # from /products.json, for Shopify sites
     notes: list[str] = Field(default_factory=list)  # skipped pages, blocks, warnings
 
 
@@ -495,7 +529,143 @@ class JobPosting(Sourced):
 
 
 class Hiring(Sourced):
+    """Open roles from the company's public job board (Greenhouse, Lever, Workable,
+    Ashby, SmartRecruiters or Recruitee). Titles, teams and places only: no people."""
+
+    provider: str | None = None  # greenhouse, lever, workable, ashby, smartrecruiters, recruitee
+    board_url: str | None = None
+    found_via: Literal["website", "name"] | None = None  # linked from the site, or found by name
+    total: int = 0  # open roles on the board (open_roles may be capped)
+    departments: dict[str, int] = Field(default_factory=dict)  # department -> open roles
+    locations: dict[str, int] = Field(default_factory=dict)  # location -> open roles
     open_roles: list[JobPosting] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+# --- other registers and public records ---------------------------------------
+
+
+class LeiEntity(BaseModel):
+    lei: str
+    name: str
+    country: str | None = None  # of its legal address
+    company_number: str | None = None  # when registered at Companies House
+
+
+class LegalEntity(Sourced):
+    """The company's Legal Entity Identifier (LEI) record from GLEIF, the global register
+    of legal entities used in financial reporting. Lists organisations only: when the
+    owners are people, GLEIF records only that fact (parent_exception NATURAL_PERSONS)."""
+
+    lei: str | None = None
+    matched_by: Literal["company_number", "name"] | None = None
+    legal_name: str | None = None
+    other_names: list[str] = Field(default_factory=list)  # trading or previous names
+    entity_status: str | None = None  # ACTIVE or INACTIVE
+    registration_status: str | None = None  # ISSUED, LAPSED (not renewed), RETIRED...
+    first_registered: date | None = None
+    next_renewal: date | None = None
+    headquarters: str | None = None  # city, country
+    direct_parent: LeiEntity | None = None
+    ultimate_parent: LeiEntity | None = None
+    parent_exception: str | None = None  # why no parent is reported, e.g. NON_CONSOLIDATING
+    subsidiaries: list[LeiEntity] = Field(default_factory=list)  # direct children, capped
+    subsidiaries_total: int = 0
+    isins: list[str] = Field(default_factory=list)  # securities it has issued (capped)
+    bic: list[str] = Field(default_factory=list)  # bank identifier codes
+    notes: list[str] = Field(default_factory=list)
+
+
+class PublicContract(Sourced):
+    """A UK public-sector contract awarded to the company (Contracts Finder)."""
+
+    title: str
+    buyer: str | None = None  # the public body
+    value: float | None = None  # awarded value in GBP
+    awarded_on: date | None = None
+    start: date | None = None
+    end: date | None = None
+    category: str | None = None  # CPV description, e.g. "IT services"
+    region: str | None = None
+    # Suppliers named on the award. Above 1 it's a framework or shared award, and the
+    # value is the whole award's, not this company's share.
+    suppliers: int = 1
+    url: str | None = None
+
+
+class PublicContracts(Sourced):
+    searched_for: str | None = None
+    found: int = 0  # awards naming the company (items may be capped)
+    sole_supplier_value: float | None = None  # total of the awards it won alone
+    top_buyers: dict[str, int] = Field(default_factory=dict)  # buyer -> awards
+    items: list[PublicContract] = Field(default_factory=list)  # newest first
+    notes: list[str] = Field(default_factory=list)
+
+
+class PoliticalDonation(Sourced):
+    """A donation the company made, from the Electoral Commission's register."""
+
+    recipient: str  # the party, campaign group or politician (public figures) who received it
+    recipient_type: str  # "Political Party", "MP - Member of Parliament", "Permitted Participant"...
+    to_individual: bool = False  # the recipient is a person (an MP, candidate...)
+    accounting_unit: str | None = None  # the part of the party, e.g. "Central Party" or a constituency
+    value: float  # GBP
+    accepted_on: date | None = None
+    donation_type: str | None = None  # Cash, Non Cash...
+    nature: str | None = None  # for non-cash donations, e.g. Travel, Sponsorship
+    sponsorship: bool = False
+    register_name: str | None = None  # the register: Great Britain or Northern Ireland
+    reference: str  # the register's own reference, e.g. C0841869
+    matched_by: Literal["company_number", "name"] = "company_number"
+    url: str | None = None
+
+
+class PoliticalDonations(Sourced):
+    searched_for: list[str] = Field(default_factory=list)  # names searched (current, previous)
+    found: int = 0
+    total_value: float | None = None
+    by_recipient: dict[str, float] = Field(default_factory=dict)  # recipient -> total GBP
+    first_donation: date | None = None
+    last_donation: date | None = None
+    items: list[PoliticalDonation] = Field(default_factory=list)  # newest first, capped
+    # Donations by other UK companies in the group (parents, subsidiaries), each matched on
+    # its own company number; only those that donated are listed.
+    group: list[GroupDonations] = Field(default_factory=list)
+    group_searched: list[str] = Field(default_factory=list)  # "NAME (number, relation)"
+    # What the latest accounts say about political donations (directors' report): companies
+    # giving over 2,000 GBP a year must disclose it. Quoted, not interpreted.
+    accounts_statement: str | None = None
+    accounts_statement_url: str | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class GroupDonations(Sourced):
+    name: str
+    company_number: str
+    relation: Literal["parent", "subsidiary"]
+    found: int = 0
+    total_value: float | None = None
+    by_recipient: dict[str, float] = Field(default_factory=dict)
+    first_donation: date | None = None
+    last_donation: date | None = None
+    items: list[PoliticalDonation] = Field(default_factory=list)  # newest first, capped
+
+
+class Domain(Sourced):
+    """Signals from the website's domain: public DNS records (email provider, services the
+    domain is verified with), certificate transparency logs (subdomains, other domains on
+    the same certificates) and the Wayback Machine (how long the site has existed)."""
+
+    name: str | None = None
+    email_provider: str | None = None  # from the MX records, e.g. Microsoft 365
+    email_services: list[str] = Field(default_factory=list)  # allowed to send its email (SPF)
+    verified_services: list[str] = Field(default_factory=list)  # domain-verification TXT records
+    email_security: list[str] = Field(default_factory=list)  # e.g. "DMARC policy: reject"
+    subdomains: list[str] = Field(default_factory=list)
+    other_domains: list[str] = Field(default_factory=list)  # on the same certificates
+    first_archived: date | None = None  # oldest Wayback Machine snapshot
+    last_archived: date | None = None
+    notes: list[str] = Field(default_factory=list)
 
 
 # --- top level ------------------------------------------------------------
@@ -528,6 +698,10 @@ class CompanyProfile(BaseModel):
     web_mentions: WebMentions = Field(default_factory=WebMentions)
     customers: list[Customer] = Field(default_factory=list)
     hiring: Hiring = Field(default_factory=Hiring)
+    lei: LegalEntity = Field(default_factory=LegalEntity)
+    public_contracts: PublicContracts = Field(default_factory=PublicContracts)
+    political_donations: PoliticalDonations = Field(default_factory=PoliticalDonations)
+    domain: Domain = Field(default_factory=Domain)
 
     def to_json(self) -> str:
         return self.model_dump_json(indent=2)

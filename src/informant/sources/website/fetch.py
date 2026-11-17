@@ -144,9 +144,9 @@ class Crawler:
 
     # --- sitemap ----------------------------------------------------------
 
-    def _fetch_text(self, url: str) -> str | None:
-        """Fetch a small text resource (a sitemap), politely and through the cache.
-        A missing file is cached too, as empty text, so it isn't asked for again."""
+    def fetch_text(self, url: str) -> str | None:
+        """Fetch a small text resource (a sitemap, a JSON feed), politely and through the
+        cache. A missing file is cached too, as empty text, so it isn't asked for again."""
         if self.cache is not None:
             hit = self.cache.get(url)
             if hit is not None:
@@ -180,7 +180,7 @@ class Crawler:
             read += 1
             if sitemap.lower().endswith(".gz"):
                 continue
-            text = self._fetch_text(sitemap)
+            text = self.fetch_text(sitemap)
             if not text:
                 continue
             locs = [html.unescape(m.strip()) for m in _LOC_RE.findall(text)]

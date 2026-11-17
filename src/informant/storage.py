@@ -73,6 +73,15 @@ def index_entry(profile: CompanyProfile, file_name: str) -> dict[str, Any]:
         # is worked out across the whole folder when the index is written
         "customers": [{"name": c.name, "company_number": c.company_number}
                       for c in profile.customers],
+        "lei": profile.lei.lei,
+        "public_contracts": profile.public_contracts.found,
+        "political_donations": profile.political_donations.found,
+        "political_donations_value": profile.political_donations.total_value,
+        "open_roles": profile.hiring.total,
+        "email_provider": profile.domain.email_provider,
+        # sites sharing one of these IDs are usually run by the same organisation;
+        # "shares_analytics_with" is worked out across the folder when the index is written
+        "analytics_ids": profile.website.analytics_ids,
         "news_count": sum(1 for n in profile.news.items if n.relevant is not False),
         "latest_news_at": max((n.published_at.isoformat() for n in profile.news.items
                                if n.published_at), default=None),
@@ -110,10 +119,32 @@ def link_customers(companies: list[dict[str, Any]]) -> None:
         entry["customer_of"] = suppliers.get(entry.get("company_number") or "", [])
 
 
+def link_shared_analytics(companies: list[dict[str, Any]]) -> None:
+    """Fill each entry's "shares_analytics_with": other companies in the folder whose
+    sites carry the same analytics or tag ID (a strong sign of common ownership)."""
+    by_id: dict[str, list[dict[str, Any]]] = {}
+    for entry in companies:
+        for aid in entry.get("analytics_ids") or []:
+            by_id.setdefault(aid, []).append(entry)
+    for entry in companies:
+        shared: dict[str, dict[str, Any]] = {}
+        for aid in entry.get("analytics_ids") or []:
+            for other in by_id.get(aid, []):
+                if other is entry or other.get("company_number") == entry.get("company_number"):
+                    continue
+                key = other.get("company_number") or other.get("name") or ""
+                link = shared.setdefault(key, {"name": other.get("name"),
+                                               "company_number": other.get("company_number"),
+                                               "ids": []})
+                link["ids"].append(aid)
+        entry["shares_analytics_with"] = list(shared.values())
+
+
 def _write_index(folder: Path, index: dict[str, Any]) -> Path:
     index["updated_at"] = utcnow().isoformat()
     index["companies"].sort(key=lambda c: (c.get("name") or "").lower())
     link_customers(index["companies"])
+    link_shared_analytics(index["companies"])
     path = folder / INDEX_NAME
     write_atomic(path, json.dumps(index, indent=2))
     return path

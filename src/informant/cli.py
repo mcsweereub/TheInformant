@@ -30,7 +30,13 @@ from .sources.companies_house import CompaniesHouseClient
 from .cache import cache_stats, clear_cache
 from .errors import ConfigError, InformantError, NotFoundError
 from .llm import STRATEGIES, ModelOption, choose_backend, current_model, model_options
-from .pipeline import REGISTRY_DEPTHS, research_company, research_customers
+from .pipeline import (
+    OPTIONAL_SOURCES,
+    REGISTRY_DEPTHS,
+    research_company,
+    research_customers,
+    skipped_sources,
+)
 from .sources.companies_house import normalise_company_number
 from .progress import ProgressEvent, emit
 from .schema import SCHEMA_VERSION, CompanyProfile
@@ -168,6 +174,9 @@ def lookup(
         None, "--search/--no-search",
         help="Use web search (Tavily, needs TAVILY_API_KEY) for mentions and to find a missing "
         "website or annual report [default: INFORMANT_SEARCH, on]."),
+    skip: list[str] | None = typer.Option(
+        None, "--skip", help="Public-data sources to leave out, comma-separated: "
+        + ", ".join(OPTIONAL_SOURCES) + " or all [default: INFORMANT_SKIP]."),
     with_customers: int = typer.Option(
         0, "--with-customers", min=0,
         help="Also research up to this many of the company's matched UK customers, each saved as "
@@ -186,11 +195,13 @@ def lookup(
             raise ConfigError("--llm-strategy must be auto, single or staged.")
         if registry is not None and registry.lower() not in REGISTRY_DEPTHS:
             raise ConfigError("--registry must be full or basic.")
+        if skip:
+            skipped_sources(skip)  # check the names before starting
         kwargs = dict(website=website, web=web, llm=llm, max_pages=max_pages, filings=filings,
                       browser=browser, llm_strategy=llm_strategy, use_cache=cache,
                       refresh=refresh, registry=registry, news=news,
                       news_days=news_days, wikipedia=wikipedia,
-                      pdf_accounts=pdf_accounts, web_search=web_search)
+                      pdf_accounts=pdf_accounts, web_search=web_search, skip=skip or None)
 
         with _progress(progress, json_mode) as callback:
             result = research_company(query, progress=callback, **kwargs)
@@ -234,6 +245,7 @@ def lookup(
         elif profile.identity.description:
             out.print(f"  [italic]{profile.identity.description}[/italic]", highlight=False)
         _print_history_and_funding(profile)
+        _print_public_records(profile)
         _print_news(profile)
         _print_mentions(profile)
         _print_customers(profile, runs)
@@ -375,6 +387,72 @@ def _research_and_save_customers(profile: CompanyProfile, main_path: Path, limit
     if runs:
         save_profile(profile, out_file=main_path)  # record which customers were researched
     return summary
+
+
+def _print_public_records(profile: CompanyProfile) -> None:
+    lei = profile.lei
+    if lei.lei:
+        parent = lei.ultimate_parent or lei.direct_parent
+        detail = [lei.registration_status or "",
+                  f"parent {parent.name} ({parent.country})" if parent else "",
+                  f"{lei.subsidiaries_total} subsidiaries with LEIs" if lei.subsidiaries_total else "",
+                  f"{len(lei.isins)} securities" if lei.isins else ""]
+        out.print(f"LEI: {lei.lei} " + " | ".join(d for d in detail if d), highlight=False)
+    pc = profile.public_contracts
+    if pc.found:
+        sole = f", {_money(pc.sole_supplier_value)} won alone" if pc.sole_supplier_value else ""
+        out.print(f"Public contracts: {pc.found} award(s){sole}; buyers: "
+                  + ", ".join(list(pc.top_buyers)[:5]), highlight=False)
+        for c in pc.items[:5]:
+            shared = f" [dim](shared, {c.suppliers} suppliers)[/dim]" if c.suppliers > 1 else ""
+            out.print(f"  {str(c.awarded_on or ''):<10}  {c.buyer}: {c.title[:80]} "
+                      f"{_money(c.value) if c.value else ''}{shared}", highlight=False)
+    pd = profile.political_donations
+    if pd.found:
+        span = (f", {pd.first_donation:%Y}-{pd.last_donation:%Y}"
+                if pd.first_donation and pd.last_donation else "")
+        out.print(f"Political donations: {pd.found}, {_money(pd.total_value)} in total{span}")
+        for recipient, value in list(pd.by_recipient.items())[:6]:
+            out.print(f"  {_money(value):>9}  {recipient}", highlight=False)
+    elif pd.group or pd.accounts_statement:
+        out.print("Political donations: none by the company itself in the register")
+    for g in pd.group:
+        top = ", ".join(list(g.by_recipient)[:3])
+        out.print(f"  by its {g.relation} {g.name} ({g.company_number}): {g.found} donation(s), "
+                  f"{_money(g.total_value)}" + (f"; to {top}" if top else ""), highlight=False)
+    if pd.accounts_statement:
+        out.print(f"  accounts say: [italic]{pd.accounts_statement}[/italic]", highlight=False)
+    for note in pd.notes:
+        out.print(f"  [dim]donations: {note}[/dim]")
+    h = profile.hiring
+    if h.provider:
+        depts = ", ".join(f"{d} ({n})" for d, n in list(h.departments.items())[:6])
+        if h.total:
+            out.print(f"Hiring: {h.total} open role(s) on {h.provider}" + (f": {depts}" if depts else ""),
+                      highlight=False)
+        else:
+            out.print(f"Hiring: no open roles on its {h.provider} board ({h.board_url})", highlight=False)
+    site = profile.website
+    if site.posts:
+        out.print(f"Site posts: {len(site.posts)}, latest: {site.posts[0].title} "
+                  f"[dim]({site.posts[0].published_on})[/dim]", highlight=False)
+    if site.shop:
+        out.print(f"Shop: {site.shop.products_listed} products; types: "
+                  + ", ".join(list(site.shop.product_types)[:6]), highlight=False)
+    d = profile.domain
+    if d.name:
+        facts = [f"email {d.email_provider}" if d.email_provider else "",
+                 f"archived since {d.first_archived:%Y}" if d.first_archived else "",
+                 f"{len(d.subdomains)} subdomains" if d.subdomains else ""]
+        out.print(f"Domain {d.name}: " + " | ".join(f for f in facts if f), highlight=False)
+        services = list(dict.fromkeys(d.email_services + d.verified_services))
+        if services:
+            out.print(f"  uses: {', '.join(services)}", highlight=False)
+        if d.other_domains:
+            out.print(f"  other domains on its certificates: {', '.join(d.other_domains[:8])}",
+                      highlight=False)
+        for note in d.notes:
+            out.print(f"  [dim]domain: {note}[/dim]")
 
 
 def _print_customers(profile: CompanyProfile, runs: list[dict] | None = None) -> None:

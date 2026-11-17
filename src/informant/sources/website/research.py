@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 
 from ...cache import LlmCache
 from ...llm import ExtractionResult, current_model, extract_with_llm
@@ -25,6 +26,7 @@ from ...schema import (
 from .discovery import discover_website
 from .extract import (
     detect_tech,
+    extract_analytics_ids,
     extract_contacts,
     extract_social_links,
     merge_structured_contacts,
@@ -71,11 +73,14 @@ def research_website(
     progress: ProgressFn | None = None,
     extra_material: list[Page] | None = None,
     search=None,
+    after_crawl: Callable[[CrawlResult], list[Page]] | None = None,
 ) -> CompanyProfile:
     """Fill the website-derived sections of `profile` in place and return it.
 
     `extra_material` (e.g. the Wikipedia article) is given to the LLM alongside the
-    website's pages, and on its own if no website is found."""
+    website's pages, and on its own if no website is found. `after_crawl` is called with
+    the crawl result before the LLM runs (e.g. to read the site's job board or feeds);
+    the pages it returns are added to the LLM material."""
     ident = profile.identity
     extra = [p for p in (extra_material or []) if p.text.strip()]
     postcode = next(
@@ -88,6 +93,9 @@ def research_website(
             return
         extract_from_material(profile, material, llm_strategy=llm_strategy,
                               llm_cache=llm_cache, progress=progress)
+
+    def more_material(result: CrawlResult) -> list[Page]:
+        return [p for p in after_crawl(result) if p.text.strip()] if after_crawl else []
 
     def fallback_description(declared: str | None = None) -> None:
         # No LLM summary (disabled, or it failed)? Next best: the Wikipedia lead, then
@@ -117,7 +125,7 @@ def research_website(
         emit(progress, "website_discovery", "failed", "Website not found")
         for stage in ("crawl", "extract"):
             emit(progress, stage, "skipped", "No website")
-        run_llm(extra)
+        run_llm(extra + more_material(CrawlResult(start_url="")))
         fallback_description()
         return profile
     emit(progress, "website_discovery", "done", found.url,
@@ -138,7 +146,7 @@ def research_website(
         site.notes.append("no readable pages; nothing extracted")
         emit(progress, "crawl", "failed", "No readable pages")
         emit(progress, "extract", "skipped", "No readable pages")
-        run_llm(extra)
+        run_llm(extra + more_material(result))
         fallback_description()
         return profile
     rendered = sum(1 for p in pages if p.rendered)
@@ -171,6 +179,7 @@ def research_website(
 
     site.emails, site.phones = extract_contacts(pages)
     site.social_links = extract_social_links(pages)
+    site.analytics_ids = extract_analytics_ids(pages)
     profile.tech_stack = detect_tech(result)
     ident.website = site.url
 
@@ -200,7 +209,7 @@ def research_website(
         material.append(Page(url=site.url, kind="structured", status_code=200,
                              title="Facts this site declares about itself (schema.org data)",
                              text=facts.as_text()))
-    run_llm(material + extra + list(pages))
+    run_llm(material + extra + more_material(result) + list(pages))
     fallback_description(facts.description)
     return profile
 

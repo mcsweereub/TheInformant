@@ -205,6 +205,25 @@ month), web search fills gaps, at most 4 searches per lookup (`INFORMANT_SEARCH_
 Searches are cached for 7 days, so re-running a company costs nothing. `--no-search`
 skips web search. Search engines' own result pages are never scraped.
 
+## Other public records
+
+Free, official sources, none of which needs a key. Each one can be left out with
+`--skip` (comma-separated, or `all`) or `INFORMANT_SKIP`:
+
+| `--skip`    | Section            | What it adds |
+|-------------|--------------------|--------------|
+| `gleif`     | `lei`              | The company's Legal Entity Identifier record from GLEIF: parent companies as the company itself reports them (often a foreign parent the UK register doesn't show), subsidiaries with LEIs, securities issued (ISINs), and why no parent is reported (for example `NATURAL_PERSONS`: owned by people, who aren't named). Found by company number, else an exact UK legal name. |
+| `contracts` | `public_contracts` | UK public-sector contracts awarded to the company (Contracts Finder, since 2015): buyer, title, value and dates. An award counts only if the company is one of the named suppliers. Framework awards name many suppliers and show the whole framework's value, so only awards won alone count towards `sole_supplier_value`. |
+| `donations` | `political_donations` | Donations the company made to UK parties, referendum campaigners and politicians (the Electoral Commission's register, above the reporting threshold): recipient, amount, date, cash or in kind, with totals per recipient. The current and previous names are searched, and a donation counts only if the donor's company number is the company's (or, filed without a number, the exact name). Recipients are named, including politicians (public figures; `to_individual` marks them); individual donors are never read. Other UK companies in the group (parents from the ownership chain and the LEI record, subsidiaries with LEIs) are searched on their own company numbers and listed separately in `group`. `accounts_statement` quotes what the latest accounts say about political donations (directors' report), from the iXBRL filing, the annual report or the OCR text. |
+| `jobs`      | `hiring`           | Open roles from the company's public job board (Greenhouse, Lever, Workable, Ashby, SmartRecruiters, Recruitee), counted by department and location. The board is found from the site's links; without one, the brand name is tried on Greenhouse and Workable, and accepted only if the board names the same employer and has open roles. Titles, teams and places only: no people. |
+| `feeds`     | `website.posts`, `website.shop` | The site's own WordPress posts (`/wp-json`) or Shopify catalogue (`/products.json`), through the crawler, so robots.txt applies. |
+| `domain`    | `domain`           | DNS records (email provider, services allowed to send its email, services the domain is verified with, DMARC policy), certificate transparency logs (subdomains, other domains on the same certificates) and the Wayback Machine (first and last snapshot; a domain older than the company is noted). |
+
+Open roles, contract awards and posts also go to the LLM with the other material.
+Analytics and tag IDs found in the pages (`website.analytics_ids`) link companies in
+`index.json`: `shares_analytics_with` names saved companies whose sites carry the same
+ID, which usually means the same organisation runs both.
+
 ## News
 
 Recent headlines that name the company (default: the last 90 days, up to 20 articles).
@@ -281,7 +300,11 @@ always present (empty when not yet populated), and every section carries
 | news             | Bing, GDELT, Guardian  | done    |
 | web_mentions     | Tavily web search      | done    |
 | customers        | LLM + Companies House  | done    |
-| hiring           | careers page / ATS     | planned |
+| hiring           | public job boards (ATS)| done    |
+| lei              | GLEIF                  | done    |
+| public_contracts | Contracts Finder       | done    |
+| political_donations | Electoral Commission | done   |
+| domain           | DNS, cert logs, Wayback| done    |
 
 ## Using TheInformant from other programs
 

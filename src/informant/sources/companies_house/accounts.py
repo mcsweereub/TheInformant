@@ -18,6 +18,7 @@ from typing import Any
 from bs4 import BeautifulSoup
 
 from ...schema import FinancialPeriod, Financials
+from ..donations import political_statement
 from .client import CompaniesHouseClient, CompaniesHouseError
 from .mapping import filing_document_url, source
 
@@ -148,6 +149,13 @@ def parse_ixbrl(document: str | bytes) -> list[dict[str, Any]]:
     return real[:2]
 
 
+def document_text(document: str | bytes) -> str:
+    """The readable text of an iXBRL document (for the directors' report statements)."""
+    if isinstance(document, bytes):
+        document = document.decode("utf-8", errors="replace")
+    return BeautifulSoup(document, "html.parser").get_text(separator=chr(10))  # one line per block
+
+
 def _is_accounts_filing(item: dict) -> bool:
     # The accounts category also holds AA01 (change of year end) and similar forms.
     return (item.get("description") or "").startswith("accounts-with") and bool(
@@ -170,19 +178,28 @@ def fetch_financials(client: CompaniesHouseClient, number: str, cache=None,
         meta_url = item["links"]["document_metadata"]
         made_up = (item.get("description_values") or {}).get("made_up_date") or item.get("date")
         cached = cache.get(meta_url) if cache is not None else None
+        if cached is not None and "political" not in cached:
+            cached = None  # cached before statements were read: read the document once more
         if cached is not None:
             periods = cached.get("periods") or []
+            statement = cached.get("political")
         else:
+            statement = None
             try:
                 if IXBRL not in client.document_formats(meta_url):
                     periods = []
                 else:
-                    periods = parse_ixbrl(client.document_content(meta_url, IXBRL))
+                    document = client.document_content(meta_url, IXBRL)
+                    periods = parse_ixbrl(document)
+                    statement = political_statement(document_text(document))
             except CompaniesHouseError as e:
                 result.notes.append(f"accounts made up to {made_up} could not be read: {e}")
                 continue
             if cache is not None:
-                cache.put(meta_url, {"company_number": number, "made_up": made_up, "periods": periods})
+                cache.put(meta_url, {"company_number": number, "made_up": made_up, "periods": periods,
+                                     "political": statement})
+        if statement and result._political_statement is None:
+            result._political_statement = (statement, filing_document_url(number, item))
         if result.latest_filing_format is None:
             result.latest_filing_format = "ixbrl" if periods else "pdf"
         if not periods:

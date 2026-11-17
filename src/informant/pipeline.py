@@ -11,6 +11,7 @@ Raises InformantError subclasses (see errors.py) on failure.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from .cache import AccountsCache, LlmCache, PageCache, cache_enabled
@@ -45,13 +46,41 @@ from .sources.website.research import summary_sentences
 from .sources.wikipedia import fetch_wikipedia
 from .sources.news import mentions, search_names
 from .sources.web_search import PEOPLE_AND_SOCIAL_DOMAINS, WebSearch
+from .sources.contracts import contracts_material, fetch_contracts
+from .sources.donations import fetch_donations, fetch_group_donations
+from .sources.domain import fetch_domain_signals
+from .sources.gleif import fetch_lei
+from .sources.jobs import fetch_jobs, find_boards, jobs_material
+from .sources.website.feeds import feeds_material, shopify_catalogue, wordpress_posts
+from .sources.website.parse import CrawlResult
 from .sources.website.extract import site_host
 from .sources.website.fetch import Crawler
 from .sources.website.parse import Page
 from .sources.website.research import extract_from_material, research_website
 
 REGISTRY_DEPTHS = ("full", "basic")
+# Public-data sources that can be skipped (--skip / INFORMANT_SKIP, comma-separated):
+#   gleif      Legal Entity Identifier record: parents, subsidiaries, securities
+#   contracts  UK public-sector contracts awarded to the company (Contracts Finder)
+#   jobs       open roles from its job board (Greenhouse, Lever, Workable...)
+#   feeds      the site's WordPress posts / Shopify catalogue
+#   domain     DNS records, certificate logs and the Wayback Machine
+#   donations  political donations it made (Electoral Commission register)
+OPTIONAL_SOURCES = ("gleif", "contracts", "donations", "jobs", "feeds", "domain")
 _OFF = {"0", "off", "false", "no"}
+
+
+def skipped_sources(skip: Iterable[str] | None = None) -> set[str]:
+    """The optional sources to leave out: `skip`, else INFORMANT_SKIP."""
+    raw = list(skip) if skip is not None else (os.environ.get("INFORMANT_SKIP") or "").split(",")
+    names = {part.strip().lower() for item in raw for part in item.split(",") if part.strip()}
+    if "all" in names:
+        return set(OPTIONAL_SOURCES)
+    unknown = names - set(OPTIONAL_SOURCES)
+    if unknown:
+        raise ConfigError(f"unknown source(s) to skip: {', '.join(sorted(unknown))}; "
+                          f"choose from {', '.join(OPTIONAL_SOURCES)} or all.")
+    return names
 
 
 @dataclass
@@ -97,6 +126,7 @@ def research_company(
     pdf_accounts: bool | None = None,
     web_search: bool | None = None,
     news_days: int | None = None,
+    skip: Iterable[str] | None = None,
     progress: ProgressFn | None = None,
     ch_client: CompaniesHouseClient | None = None,
     crawler: Crawler | None = None,
@@ -113,11 +143,14 @@ def research_company(
     a merge call); defaults to INFORMANT_LLM_STRATEGY or "auto".
     use_cache: reuse locally cached pages and LLM answers (see cache.py).
     refresh: re-download pages even if cached (unchanged pages still reuse LLM answers).
+    skip: optional public-data sources to leave out (see OPTIONAL_SOURCES); defaults to
+    INFORMANT_SKIP.
     """
     depth = (registry or os.environ.get("INFORMANT_REGISTRY") or "full").strip().lower()
     if depth not in REGISTRY_DEPTHS:
         raise ConfigError(f"registry depth must be full or basic, not {depth!r}.")
     caching = use_cache and cache_enabled()
+    skipped = skipped_sources(skip)
 
     own_ch = ch_client is None
     ch = ch_client or CompaniesHouseClient(os.environ.get("COMPANIES_HOUSE_API_KEY", ""))
@@ -168,22 +201,50 @@ def research_company(
              "Web search disabled" if web_search is False else "No TAVILY_API_KEY set")
     extra = [m for m in (wiki_material, mentions_material) if m is not None]
 
+    api_cache = PageCache(refresh=refresh) if caching else None
+    if "gleif" not in skipped:
+        research_lei(profile, cache=api_cache, progress=progress)
+    else:
+        emit(progress, "lei", "skipped", "LEI lookup skipped")
+    if "contracts" not in skipped:
+        contracts_page = research_contracts(profile, cache=api_cache, progress=progress)
+        if contracts_page is not None:
+            extra.append(contracts_page)
+    else:
+        emit(progress, "contracts", "skipped", "Public contracts skipped")
+    if "donations" not in skipped:
+        research_donations(profile, cache=api_cache, progress=progress)
+    else:
+        emit(progress, "donations", "skipped", "Political donations skipped")
+
     if web:
         own_crawler = crawler is None
         crawler = crawler or Crawler(
             browser=browser, cache=PageCache(refresh=refresh) if caching else None)
+        site_crawler = crawler
+
+        def after_crawl(result: CrawlResult) -> list[Page]:
+            found: list[Page] = []
+            if "feeds" not in skipped and result.ok_pages:
+                found += research_site_feeds(profile, site_crawler, progress=progress)
+            if "jobs" not in skipped:
+                found += research_jobs(profile, result, cache=api_cache, progress=progress)
+            return found
+
         try:
             research_website(profile, crawler=crawler, user_url=website,
                              max_pages=max_pages, use_llm=llm, llm_strategy=llm_strategy,
                              llm_cache=LlmCache() if caching else None,
                              progress=progress,
-                             extra_material=extra, search=search)
+                             extra_material=extra, search=search, after_crawl=after_crawl)
         finally:
             if own_crawler:
                 crawler.close()
     else:
         for stage in ("website_discovery", "crawl", "extract"):
             emit(progress, stage, "skipped", "Website research disabled")
+        if "jobs" not in skipped:
+            extra += research_jobs(profile, None, cache=api_cache, progress=progress)
         if llm and extra:
             # No website, but the Wikipedia article and web mentions are still worth reading.
             extract_from_material(profile, extra, llm_strategy=llm_strategy,
@@ -193,6 +254,11 @@ def research_company(
                  "Website research disabled" if llm else "LLM disabled")
         if not profile.identity.description:
             profile.identity.description = summary_sentences(profile.wikipedia.summary)
+
+    if "domain" not in skipped:
+        research_domain(profile, cache=api_cache, progress=progress)
+    else:
+        emit(progress, "domain", "skipped", "Domain signals skipped")
 
     if pdf_accounts is None:
         pdf_accounts = os.environ.get("INFORMANT_PDF_ACCOUNTS", "on").strip().lower() not in _OFF
@@ -379,6 +445,9 @@ def research_pdf_accounts(profile: CompanyProfile, *, use_llm: bool = True, use_
     fin.auditor = fin.auditor or result.auditor
     fin.ultimate_controlling_party = fin.ultimate_controlling_party or result.ultimate_controlling_party
     fin.document_url = doc.url
+    pd = profile.political_donations
+    if doc.political_statement and not pd.accounts_statement:
+        pd.accounts_statement, pd.accounts_statement_url = doc.political_statement, doc.url
     how = ("the company's annual report" if doc.method == "annual_report"
            else "an OCR of the scanned filing (check important figures against the document)")
     fin.notes = [n for n in fin.notes if "PDF only" not in n]
@@ -461,3 +530,139 @@ def research_news(profile: CompanyProfile, *, days: int = DEFAULT_NEWS_DAYS, lim
     relevant = sum(1 for n in section.items if n.relevant is not False)
     emit(progress, "news", "done", f"{relevant} article(s)",
          articles=len(section.items), relevant=relevant, providers=found.providers)
+
+
+# --- other public records ----------------------------------------------------------
+
+
+def _known_website(profile: CompanyProfile) -> str | None:
+    """The company's site: the crawled one, else the one Wikidata lists."""
+    return profile.identity.website or next(iter(profile.wikipedia.official_websites), None)
+
+
+def research_lei(profile: CompanyProfile, *, cache=None, progress: ProgressFn | None = None) -> None:
+    """Fill profile.lei from GLEIF (by company number, else exact UK legal name)."""
+    ident = profile.identity
+    emit(progress, "lei", "started", "Looking up the Legal Entity Identifier (GLEIF)")
+    profile.lei = fetch_lei(ident.company_number or "", ident.name, cache=cache).section
+    lei = profile.lei
+    if lei.lei:
+        emit(progress, "lei", "done", lei.lei, lei=lei.lei, subsidiaries=lei.subsidiaries_total)
+    else:
+        emit(progress, "lei", "skipped", lei.notes[-1] if lei.notes else "No LEI")
+
+
+def research_contracts(profile: CompanyProfile, *, cache=None,
+                       progress: ProgressFn | None = None) -> Page | None:
+    """Fill profile.public_contracts; returns the awards as LLM material (or None)."""
+    emit(progress, "contracts", "started", "Searching UK public-sector contracts")
+    profile.public_contracts = fetch_contracts(profile.identity.name, cache=cache)
+    pc = profile.public_contracts
+    emit(progress, "contracts", "done", f"{pc.found} contract award(s)", found=pc.found)
+    return contracts_material(pc)
+
+
+def research_jobs(profile: CompanyProfile, result: CrawlResult | None, *, cache=None,
+                  progress: ProgressFn | None = None) -> list[Page]:
+    """Fill profile.hiring from the job board the site links to (or one found by name);
+    returns the roles as LLM material."""
+    ident = profile.identity
+    emit(progress, "jobs", "started", "Looking for a public job board")
+    pages = result.ok_pages if result is not None else []
+    boards = find_boards([p.html for p in pages], [href for p in pages for href, _ in p.links])
+    names = search_names(ident.name, _known_website(profile))
+    profile.hiring = fetch_jobs(ident.name, boards=boards, names=names, cache=cache)
+    h = profile.hiring
+    if h.provider:
+        emit(progress, "jobs", "done", f"{h.total} open role(s) on {h.provider}",
+             provider=h.provider, roles=h.total)
+    else:
+        emit(progress, "jobs", "skipped", h.notes[-1] if h.notes else "No job board")
+    material = jobs_material(h)
+    return [material] if material is not None else []
+
+
+def research_site_feeds(profile: CompanyProfile, crawler: Crawler, *,
+                        progress: ProgressFn | None = None) -> list[Page]:
+    """WordPress posts and the Shopify catalogue, when the site runs on them."""
+    site = profile.website
+    if not site.url:
+        return []
+    wp, shop = "WordPress" in profile.tech_stack, "Shopify" in profile.tech_stack
+    if not (wp or shop):
+        emit(progress, "feeds", "skipped", "Not a WordPress or Shopify site")
+        return []
+    emit(progress, "feeds", "started", "Reading the site's own feeds")
+    if wp:
+        site.posts = wordpress_posts(crawler, site.url)
+    if shop:
+        site.shop = shopify_catalogue(crawler, site.url)
+        if site.shop is None:
+            site.notes.append("Shopify product feed not available")
+    emit(progress, "feeds", "done", f"{len(site.posts)} post(s)"
+         + (f", {site.shop.products_listed} products" if site.shop else ""),
+         posts=len(site.posts), products=site.shop.products_listed if site.shop else 0)
+    return feeds_material(site.posts, site.shop, site.url)
+
+
+def research_domain(profile: CompanyProfile, *, cache=None,
+                    progress: ProgressFn | None = None) -> None:
+    """Fill profile.domain: DNS, certificate logs and the Wayback Machine."""
+    website = _known_website(profile)
+    if not website:
+        emit(progress, "domain", "skipped", "No website known")
+        return
+    emit(progress, "domain", "started", "Reading DNS, certificate logs and the web archive")
+    profile.domain = fetch_domain_signals(website, incorporated_on=profile.identity.incorporated_on,
+                                          cache=cache)
+    d = profile.domain
+    emit(progress, "domain", "done", d.email_provider or d.name, email_provider=d.email_provider,
+         subdomains=len(d.subdomains))
+
+
+def research_donations(profile: CompanyProfile, *, cache=None,
+                       progress: ProgressFn | None = None) -> None:
+    """Fill profile.political_donations from the Electoral Commission's register, searching
+    the current and previous names and matching on the company number; then the same for
+    the other UK companies in its group (parents and LEI subsidiaries)."""
+    ident = profile.identity
+    emit(progress, "donations", "started", "Searching the register of political donations")
+    names = [ident.name] + [p.name for p in ident.previous_names]
+    earlier = profile.political_donations  # the accounts statement may already be there
+    pd = fetch_donations(ident.company_number or "", names, cache=cache)
+    pd.accounts_statement = earlier.accounts_statement
+    pd.accounts_statement_url = earlier.accounts_statement_url
+    profile.political_donations = pd
+
+    group = group_companies(profile)
+    if group:
+        emit(progress, "donations", "progress", f"Checking {len(group)} other group companies")
+        pd.group, notes = fetch_group_donations(group, cache=cache)
+        pd.group_searched = [f"{name} ({number}, {relation})" for number, name, relation in group]
+        pd.notes.extend(notes)
+    in_group = sum(g.found for g in pd.group)
+    emit(progress, "donations", "done", f"{pd.found} donation(s)"
+         + (f", {in_group} by group companies" if in_group else ""),
+         found=pd.found, total_value=pd.total_value, group_found=in_group)
+
+
+def group_companies(profile: CompanyProfile) -> list[tuple[str, str, str]]:
+    """Other UK-registered companies in the group as (number, name, relation): parents from
+    the PSC chain and the LEI record, then subsidiaries that have LEIs."""
+    own = (profile.identity.company_number or "").lstrip("0")
+    out: dict[str, tuple[str, str, str]] = {}
+
+    def add(number: str | None, name: str, relation: str) -> None:
+        key = (number or "").upper().lstrip("0")
+        if key and key != own and key not in out:
+            out[key] = (number, name, relation)
+
+    for parent in profile.ownership.parents:
+        add(parent.company_number, parent.name, "parent")
+    lei = profile.lei
+    for parent in (lei.direct_parent, lei.ultimate_parent):
+        if parent is not None:
+            add(parent.company_number, parent.name, "parent")
+    for child in lei.subsidiaries:
+        add(child.company_number, child.name, "subsidiary")
+    return list(out.values())

@@ -25,4 +25,7 @@ def no_cache_by_default(monkeypatch):
     monkeypatch.setenv("INFORMANT_SEARCH", "off")
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.delenv("INFORMANT_CONTACT", raising=False)
+    # The other public-data sources (GLEIF, Contracts Finder, job boards, site feeds,
+    # DNS/certificates/Wayback) are tested in test_public_data.py.
+    monkeypatch.setenv("INFORMANT_SKIP", "all")
     monkeypatch.delenv("GUARDIAN_API_KEY", raising=False)

@@ -32,6 +32,7 @@ import httpx
 
 from .companies_house.client import CompaniesHouseClient, CompaniesHouseError
 from .companies_house.mapping import filing_document_url
+from .donations import political_statement
 from .website.extract import core_name, site_host
 
 PDF = "application/pdf"
@@ -72,6 +73,7 @@ class AccountsDocument:
     total_pages: int
     pages: list[PdfPage]
     notes: list[str] = field(default_factory=list)
+    political_statement: str | None = None  # what it says about political donations
 
 
 # --- the latest accounts filing ------------------------------------------------------
@@ -409,7 +411,8 @@ def get_accounts_document(client: CompaniesHouseClient, number: str, company_nam
         if found is not None:
             url, texts = found
             return AccountsDocument("annual_report", url, made_up, item.get("date"), len(texts),
-                                    select_pages(texts), notes)
+                                    select_pages(texts), notes,
+                                    political_statement(" ".join(texts)))
         notes.append("the company's own annual report PDF wasn't found")
 
     if tesseract_path() is None:
@@ -424,7 +427,9 @@ def get_accounts_document(client: CompaniesHouseClient, number: str, company_nam
     texts = pdf_page_texts(data)
     if has_text_layer(texts):  # a filed PDF that does have text after all
         return AccountsDocument("annual_report", filing_document_url(number, item) or meta, made_up,
-                                item.get("date"), len(texts), select_pages(texts), notes)
+                                item.get("date"), len(texts), select_pages(texts), notes,
+                                political_statement(" ".join(texts)))
     quick, chosen = ocr_document(data, cache=cache, cache_key=meta, progress=progress)
     return AccountsDocument("ocr", filing_document_url(number, item) or meta, made_up,
-                            item.get("date"), len(quick), chosen, notes)
+                            item.get("date"), len(quick), chosen, notes,
+                            political_statement(" ".join(quick)))

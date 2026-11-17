@@ -162,6 +162,33 @@ def detect_tech(result: CrawlResult) -> list[str]:
     return found
 
 
+# --- analytics IDs --------------------------------------------------------
+
+# Account IDs of analytics and tag tools. Two sites with the same ID are almost always
+# run by the same organisation (sister brands, old domains, agencies' own sites aside).
+ANALYTICS_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("", re.compile(r"\b(GTM-[A-Z0-9]{4,9})\b")),
+    ("", re.compile(r"\b(UA-\d{4,10}-\d{1,4})\b")),
+    ("", re.compile(r"""(?:gtag/js\?id=|gtag\(\s*['"]config['"]\s*,\s*['"])(G-[A-Z0-9]{6,12})\b""")),
+    ("", re.compile(r"""(?:gtag/js\?id=|gtag\(\s*['"]config['"]\s*,\s*['"])(AW-\d{6,12})\b""")),
+    ("meta-pixel:", re.compile(r"""fbq\(\s*['"]init['"]\s*,\s*['"](\d{10,20})['"]""")),
+    ("hotjar:", re.compile(r"""hjid\s*[:=]\s*(\d{5,10})""")),
+    ("hubspot:", re.compile(r"js(?:-eu1)?\.hs-scripts\.com/(\d{5,10})\.js")),
+    ("clarity:", re.compile(r"""clarity\.ms/tag/['"]?\s*\+?\s*['"]?([a-z0-9]{8,12})""")),
+]
+
+
+def extract_analytics_ids(pages: list[Page]) -> list[str]:
+    found: list[str] = []
+    for page in pages:
+        for prefix, pattern in ANALYTICS_PATTERNS:
+            for m in pattern.findall(page.html or ""):
+                value = prefix + m
+                if value not in found:
+                    found.append(value)
+    return found[:30]
+
+
 # --- ownership verification -----------------------------------------------
 
 
@@ -219,6 +246,21 @@ def core_name(company_name: str) -> str:
     name = _SUFFIXES.sub(" ", company_name.lower())
     name = re.sub(r"[^a-z0-9 ]+", " ", name)
     return re.sub(r"\s+", " ", name).strip()
+
+
+_LEGAL_SUFFIX = re.compile(r"\s+(limited|ltd|plc|llp|lp|public limited company)$")
+
+
+def legal_key(name: str) -> str:
+    """The name without its legal suffix, and nothing else removed: 'MONZO BANK LTD' and
+    'Monzo Bank Limited' -> 'monzo bank', but 'MONZO BANK HOLDING GROUP LIMITED' keeps its
+    'holding group' (a different legal entity). Stricter than core_name, for matching
+    one legal entity to another."""
+    s = name.lower().replace("&", " and ")
+    s = re.sub(r"(?<=\b[a-z])\.", "", s)  # P.L.C. -> plc
+    s = re.sub(r"[^a-z0-9 ]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return _LEGAL_SUFFIX.sub("", s)
 
 
 def site_host(url: str) -> str:

@@ -20,7 +20,7 @@ from .client import CompaniesHouseClient, CompaniesHouseError
 MAX_LOOKUPS = 25  # register searches per profile
 
 
-def _key(name: str) -> str:
+def name_key(name: str) -> str:
     """'B.P. P.L.C.' and 'BP plc' -> 'bp'; 'Marks & Spencer' -> 'marks and spencer'."""
     cleaned = re.sub(r"(?<=\b\w)\.(?=\w\.)|(?<=\b\w)\.(?=\s|$)", "", name)  # B.P. -> BP
     cleaned = cleaned.replace("&", " and ").replace(".", " ")
@@ -28,17 +28,17 @@ def _key(name: str) -> str:
 
 
 def match_customer(client: CompaniesHouseClient, customer: Customer) -> None:
-    wanted = _key(customer.name)
+    wanted = name_key(customer.name)
     if len(wanted) < 2:
         customer.match = "none"
         return
     hits = client.search(customer.name, limit=10)
-    exact = [h for h in hits if _key(h.title) == wanted]
+    exact = [h for h in hits if name_key(h.title) == wanted]
     if exact:
         best = next((h for h in exact if (h.status or "") == "active"), exact[0])
         customer.match = "exact"
     else:
-        starts = [h for h in hits if _key(h.title).startswith(wanted + " ")]
+        starts = [h for h in hits if name_key(h.title).startswith(wanted + " ")]
         if len(starts) != 1:
             customer.match = "none"
             return
