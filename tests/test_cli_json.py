@@ -174,4 +174,4 @@ def test_research_company_as_library(workdir):
     result = research_company(NUMBER, web=False, progress=events.append)
     assert result.profile.identity.company_number == NUMBER
     assert events[0].stage == "resolve"
-    assert [e.stage for e in events[-3:]] == ["llm", "accounts_pdf", "news"]  # all skipped here
+    assert [e.stage for e in events[-4:]] == ["llm", "accounts_pdf", "customers", "news"]  # all skipped

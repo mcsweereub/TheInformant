@@ -9,6 +9,7 @@ from ...llm import ExtractionResult, current_model, extract_with_llm
 from ...progress import ProgressFn, emit
 from ...schema import (
     CompanyProfile,
+    Customer,
     Funding,
     FundingRound,
     KeyFact,
@@ -274,6 +275,11 @@ def _merge_llm(profile: CompanyProfile, llm: ExtractionResult, page_urls: list[s
         Product(name=p.name, description=p.description, category=p.category,
                 sources=_source_for(p.source_page, page_urls, site_url))
         for p in d.products
+    ]
+    profile.customers = [
+        Customer(name=c.name, evidence=c.evidence or None,
+                 sources=_source_for(c.source_page, page_urls, site_url))
+        for c in d.customers
     ]
     for o in d.offices:
         postcode = _POSTCODE.search(f"{o.address} {o.label}".upper())

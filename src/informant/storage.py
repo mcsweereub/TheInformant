@@ -69,6 +69,10 @@ def index_entry(profile: CompanyProfile, file_name: str) -> dict[str, Any]:
         "first_year": profile.history[0].year if profile.history else None,
         "milestones": len(profile.history),
         "funding_rounds": len(profile.funding.rounds),
+        # who this company sells to (matched UK customers have a number); "customer_of"
+        # is worked out across the whole folder when the index is written
+        "customers": [{"name": c.name, "company_number": c.company_number}
+                      for c in profile.customers],
         "news_count": sum(1 for n in profile.news.items if n.relevant is not False),
         "latest_news_at": max((n.published_at.isoformat() for n in profile.news.items
                                if n.published_at), default=None),
@@ -92,9 +96,24 @@ def _empty_index() -> dict[str, Any]:
             "updated_at": None, "companies": []}
 
 
+def link_customers(companies: list[dict[str, Any]]) -> None:
+    """Fill each entry's "customer_of" from the other entries' customer lists, so the
+    links are right whatever order the companies were researched in."""
+    suppliers: dict[str, list[dict[str, Any]]] = {}
+    for entry in companies:
+        for customer in entry.get("customers") or []:
+            number = customer.get("company_number")
+            if number and entry.get("company_number"):
+                suppliers.setdefault(number, []).append(
+                    {"name": entry.get("name"), "company_number": entry.get("company_number")})
+    for entry in companies:
+        entry["customer_of"] = suppliers.get(entry.get("company_number") or "", [])
+
+
 def _write_index(folder: Path, index: dict[str, Any]) -> Path:
     index["updated_at"] = utcnow().isoformat()
     index["companies"].sort(key=lambda c: (c.get("name") or "").lower())
+    link_customers(index["companies"])
     path = folder / INDEX_NAME
     write_atomic(path, json.dumps(index, indent=2))
     return path
@@ -110,6 +129,18 @@ def load_index(folder: Path) -> dict[str, Any]:
     except (OSError, ValueError):
         pass
     return rebuild_index(folder)
+
+
+def load_saved_profile(folder: Path, company_number: str) -> tuple[CompanyProfile, Path] | None:
+    """A previously saved profile from `folder`, found through its index."""
+    for entry in load_index(folder)["companies"]:
+        if entry.get("company_number") == company_number and entry.get("file"):
+            path = folder / entry["file"]
+            try:
+                return CompanyProfile.model_validate_json(path.read_text(encoding="utf-8")), path
+            except (OSError, ValidationError, ValueError):
+                return None
+    return None
 
 
 def rebuild_index(folder: Path) -> dict[str, Any]:

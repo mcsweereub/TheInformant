@@ -18,7 +18,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-SCHEMA_VERSION = "0.11.0"
+SCHEMA_VERSION = "0.12.0"
 
 SourceName = Literal[
     "companies_house",
@@ -404,6 +404,20 @@ class KeyFact(Sourced):
     text: str
 
 
+class Customer(Sourced):
+    """An organisation named as a customer (LLM, checked against the source text), and
+    its Companies House match if it's a UK company."""
+
+    name: str  # as the source names it
+    evidence: str | None = None  # how it's mentioned: "case study", "client list"...
+    company_number: str | None = None
+    registered_name: str | None = None  # the name on the Companies House register
+    status: str | None = None  # active, dissolved...
+    match: Literal["exact", "likely", "none"] | None = None  # how sure the register match is
+    researched: bool = False  # a profile of this customer was built in the same run
+    profile_path: str | None = None  # where that profile was saved
+
+
 class WebMention(BaseModel):
     """A page elsewhere on the web that mentions the company (from web search)."""
 
@@ -512,6 +526,7 @@ class CompanyProfile(BaseModel):
     key_facts: list[KeyFact] = Field(default_factory=list)
     funding: Funding = Field(default_factory=Funding)
     web_mentions: WebMentions = Field(default_factory=WebMentions)
+    customers: list[Customer] = Field(default_factory=list)
     hiring: Hiring = Field(default_factory=Hiring)
 
     def to_json(self) -> str:

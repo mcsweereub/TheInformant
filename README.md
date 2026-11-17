@@ -164,6 +164,29 @@ Every entry is checked against the source text: a milestone's year and most of i
 must appear there, investors and shareholders must be named there, and duplicates are
 merged. Each entry records the page it came from.
 
+## Customers
+
+Every lookup lists the customers the material names (`customers`): organisations in case
+studies, client lists, "trusted by" sections or contract announcements, with a few words on
+how each is mentioned and the page it came from. Only organisations are recorded; names
+must appear in the text; generic phrases and the company itself are dropped.
+
+Each customer is then looked up on Companies House: UK companies get their number, registered
+name and status (`match`: `exact`, `likely` or `none`; foreign companies stay unmatched).
+
+Researching the customers themselves is optional, now or later. Each becomes its own
+profile in the same folder, with the same options as the main lookup (customers' own
+customers are listed but not researched further):
+
+```sh
+uv run informant lookup 09461711 --with-customers 5   # research up to 5 customers now
+uv run informant customers 09461711                   # later: list a saved company's customers
+uv run informant customers 09461711 --research -n 5   # later: research them
+```
+
+`index.json` links them both ways: each entry lists its `customers`, and `customer_of`
+names the saved companies that list it as a customer.
+
 ## Web search
 
 With `TAVILY_API_KEY` set (free key from https://tavily.com, about 1,000 searches a
@@ -257,6 +280,7 @@ always present (empty when not yet populated), and every section carries
 | wikipedia        | Wikipedia + Wikidata   | done    |
 | news             | Bing, GDELT, Guardian  | done    |
 | web_mentions     | Tavily web search      | done    |
+| customers        | LLM + Companies House  | done    |
 | hiring           | careers page / ATS     | planned |
 
 ## Using TheInformant from other programs

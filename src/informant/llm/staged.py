@@ -24,6 +24,7 @@ from .prompts import (
     MAX_FUNDING,
     MAX_MILESTONES,
     MAX_SHAREHOLDERS,
+    MAX_CUSTOMERS,
     MERGE_SYSTEM_PROMPT,
     STAGE_SYSTEM_PROMPT,
     ChunkFindings,
@@ -32,6 +33,7 @@ from .prompts import (
     ExtractedOffice,
     ExtractedProduct,
     ExtractedShareholder,
+    ExtractedCustomer,
     MergedProfile,
     WebsiteExtraction,
     merge_message,
@@ -166,6 +168,7 @@ def extract_staged(company_name: str, pages: list, complete: CompleteFn,
     milestones: list[ExtractedMilestone] = []
     funding: list[ExtractedFunding] = []
     shareholders: list[ExtractedShareholder] = []
+    customers: list[ExtractedCustomer] = []
     model: str | None = None
     elapsed = 0.0
     calls = 0
@@ -196,6 +199,7 @@ def extract_staged(company_name: str, pages: list, complete: CompleteFn,
         milestones += f.milestones
         funding += f.funding_rounds
         shareholders += f.shareholders
+        customers += f.customers
 
     facts = _dedupe(facts, _norm)
     all_facts = facts
@@ -205,6 +209,7 @@ def extract_staged(company_name: str, pages: list, complete: CompleteFn,
     milestones = _dedupe(milestones, lambda m: f"{m.year} {_norm(m.event)[:60]}")[:MAX_MILESTONES]
     funding = _dedupe(funding, lambda r: f"{r.year} {_norm(r.amount)} {_norm(r.round)}")[:MAX_FUNDING]
     shareholders = _dedupe(shareholders, lambda s: _norm(s.name))[:MAX_SHAREHOLDERS]
+    customers = _dedupe(customers, lambda c: _norm(c.name))[:MAX_CUSTOMERS]
     products = _dedupe(products, lambda p: _norm(p.name))[:MAX_ITEMS]
     offices = _dedupe(offices, lambda o: _norm(f"{o.label} {o.address}"))[:MAX_ITEMS]
     markets = _dedupe(markets, _norm)
@@ -242,6 +247,7 @@ def extract_staged(company_name: str, pages: list, complete: CompleteFn,
         milestones=milestones,
         funding_rounds=funding,
         shareholders=shareholders,
+        customers=customers,
     )
     result = finish(data, model, notes, source_text="\n".join(chunks), company_name=company_name)
     result.strategy = "staged"

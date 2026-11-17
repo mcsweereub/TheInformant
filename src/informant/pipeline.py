@@ -37,6 +37,7 @@ from .sources.companies_house import (
     normalise_company_number,
 )
 from .sources.companies_house.details import STAGE as REGISTRY_STAGE
+from .sources.companies_house.customers import resolve_customers
 from .sources.companies_house.details import add_registry_details, add_risk_flags
 from .sources.news import DEFAULT_DAYS as DEFAULT_NEWS_DAYS
 from .sources.news import fetch_news
@@ -205,6 +206,8 @@ def research_company(
     else:
         emit(progress, "accounts_pdf", "skipped", "PDF accounts reading disabled")
 
+    match_customers_on_register(profile, progress=progress)
+
     if news is None:
         news = os.environ.get("INFORMANT_NEWS", "on").strip().lower() not in _OFF
     if news:
@@ -222,6 +225,66 @@ def research_company(
         profile.web_mentions.notes.extend(n for n in search.notes
                                           if n not in profile.web_mentions.notes)
     return LookupResult(profile=profile, matched_by=matched_by, alternatives=alternatives)
+
+
+def match_customers_on_register(profile: CompanyProfile, *,
+                                progress: ProgressFn | None = None) -> None:
+    """Look up each named customer on Companies House (UK companies get a number)."""
+    if not profile.customers:
+        emit(progress, "customers", "skipped", "No customers named")
+        return
+    emit(progress, "customers", "started", f"Matching {len(profile.customers)} customer(s) "
+                                           "on Companies House")
+    try:
+        with CompaniesHouseClient(os.environ.get("COMPANIES_HOUSE_API_KEY", "")) as ch:
+            notes = resolve_customers(ch, profile.customers, profile.identity.company_number)
+    except InformantError as e:
+        notes = [f"customers not matched: {e}"]
+    profile.website.notes.extend(notes)
+    matched = sum(1 for c in profile.customers if c.company_number)
+    emit(progress, "customers", "done", f"{matched} of {len(profile.customers)} matched",
+         customers=len(profile.customers), matched=matched)
+
+
+@dataclass
+class CustomerResearch:
+    """The outcome of researching one customer."""
+
+    name: str
+    company_number: str
+    result: LookupResult | None = None
+    error: str | None = None
+
+
+def customers_to_research(profile: CompanyProfile, limit: int = 5) -> list:
+    """Matched UK customers, exact matches first, active companies only, in list order."""
+    matched = [c for c in profile.customers
+               if c.company_number and c.match in ("exact", "likely") and (c.status or "") == "active"]
+    matched.sort(key=lambda c: c.match != "exact")
+    return matched[:max(0, limit)]
+
+
+def research_customers(profile: CompanyProfile, *, limit: int = 5,
+                       progress: ProgressFn | None = None, **lookup_options) -> list[CustomerResearch]:
+    """Build a profile for each of the first `limit` matched customers, with the same
+    options as the main lookup (`lookup_options` are passed to research_company). Not
+    recursive: customers' own customers are listed but not researched. One failure
+    doesn't stop the rest. Profiles aren't saved here; the caller saves them."""
+    out: list[CustomerResearch] = []
+    chosen = customers_to_research(profile, limit)
+    for i, customer in enumerate(chosen, 1):
+        emit(progress, "customer_research", "started",
+             f"Researching customer {i} of {len(chosen)}: {customer.registered_name or customer.name}",
+             company_number=customer.company_number, index=i, total=len(chosen))
+        try:
+            result = research_company(customer.company_number, progress=progress, **lookup_options)
+            out.append(CustomerResearch(customer.name, customer.company_number, result=result))
+            emit(progress, "customer_research", "done", customer.registered_name or customer.name,
+                 company_number=customer.company_number)
+        except InformantError as e:
+            out.append(CustomerResearch(customer.name, customer.company_number, error=str(e)))
+            emit(progress, "customer_research", "failed", str(e), company_number=customer.company_number)
+    return out
 
 
 def research_web_mentions(profile: CompanyProfile, search: WebSearch, *,

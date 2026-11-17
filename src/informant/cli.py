@@ -12,6 +12,7 @@ People get readable output. Programs (e.g. a GUI) add `--json` to any command:
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 import os
 import sys
 from collections.abc import Callable
@@ -27,12 +28,13 @@ from rich.table import Table
 
 from .sources.companies_house import CompaniesHouseClient
 from .cache import cache_stats, clear_cache
-from .errors import ConfigError, InformantError
+from .errors import ConfigError, InformantError, NotFoundError
 from .llm import STRATEGIES, ModelOption, choose_backend, current_model, model_options
-from .pipeline import REGISTRY_DEPTHS, research_company
+from .pipeline import REGISTRY_DEPTHS, research_company, research_customers
+from .sources.companies_house import normalise_company_number
 from .progress import ProgressEvent, emit
 from .schema import SCHEMA_VERSION, CompanyProfile
-from .storage import default_output_dir, load_index, save_profile
+from .storage import default_output_dir, load_index, load_saved_profile, save_profile
 
 app = typer.Typer(add_completion=False, help="Research UK companies into structured JSON.")
 out = Console()  # results for people (stdout)
@@ -166,6 +168,10 @@ def lookup(
         None, "--search/--no-search",
         help="Use web search (Tavily, needs TAVILY_API_KEY) for mentions and to find a missing "
         "website or annual report [default: INFORMANT_SEARCH, on]."),
+    with_customers: int = typer.Option(
+        0, "--with-customers", min=0,
+        help="Also research up to this many of the company's matched UK customers, each saved as "
+        "its own profile (or later: informant customers <number> --research)."),
     json_mode: bool = JSON_OPT,
     progress: bool = typer.Option(False, "--progress", help="Write JSON progress events to stderr."),
 ) -> None:
@@ -186,23 +192,15 @@ def lookup(
                       news_days=news_days, wikipedia=wikipedia,
                       pdf_accounts=pdf_accounts, web_search=web_search)
 
-        if progress or json_mode:
-            callback = _write_progress_line if progress else None
+        with _progress(progress, json_mode) as callback:
             result = research_company(query, progress=callback, **kwargs)
-        else:
-            with err.status("Starting...") as spinner:
-                def callback(event: ProgressEvent) -> None:
-                    if event.status in ("started", "progress") and event.message:
-                        text = event.message
-                        if event.stage == "llm" and choose_backend() == "ollama":
-                            text += " (local model: this can take a few minutes)"
-                        spinner.update(text + "...")
-                result = research_company(query, progress=callback, **kwargs)
-            callback = None
-
-        emit(callback, "save", "started", "Saving profile")
-        path, index_path = save_profile(result.profile, out_dir=out_dir, out_file=out_file)
-        emit(callback, "save", "done", str(path), path=str(path))
+            emit(callback, "save", "started", "Saving profile")
+            path, index_path = save_profile(result.profile, out_dir=out_dir, out_file=out_file)
+            emit(callback, "save", "done", str(path), path=str(path))
+            runs = []
+            if with_customers:
+                runs = _research_and_save_customers(result.profile, path, with_customers, kwargs,
+                                                    callback)
 
         profile = result.profile
         if json_mode:
@@ -219,6 +217,7 @@ def lookup(
                 "index": str(index_path),
                 "alternatives": [asdict(h) for h in result.alternatives],
                 "warnings": profile.website.notes,
+                "customer_research": runs,
                 "profile": profile.model_dump(mode="json"),
             })
             return
@@ -237,6 +236,7 @@ def lookup(
         _print_history_and_funding(profile)
         _print_news(profile)
         _print_mentions(profile)
+        _print_customers(profile, runs)
         active = sum(1 for o in profile.people.officers if o.active)
         out.print(
             f"[green]Wrote {path}[/green]  "
@@ -338,6 +338,66 @@ def _print_history_and_funding(profile: CompanyProfile) -> None:
         out.print(f"[dim]{len(profile.key_facts)} key facts in the JSON file[/dim]")
 
 
+@contextmanager
+def _progress(progress: bool, json_mode: bool):
+    """Yields the progress callback: JSON lines on stderr (--progress), nothing (--json),
+    or a spinner for people."""
+    if progress or json_mode:
+        yield _write_progress_line if progress else None
+        return
+    with err.status("Starting...") as spinner:
+        def callback(event: ProgressEvent) -> None:
+            if event.status in ("started", "progress") and event.message:
+                text = event.message
+                if event.stage == "llm" and choose_backend() == "ollama":
+                    text += " (local model: this can take a few minutes)"
+                spinner.update(text + "...")
+        yield callback
+
+
+def _research_and_save_customers(profile: CompanyProfile, main_path: Path, limit: int,
+                                 options: dict, callback) -> list[dict]:
+    """Research up to `limit` matched customers with the same options, save each next to
+    the main profile, mark them on the main profile and save it again."""
+    options = {k: v for k, v in options.items() if k != "website"}  # that was the main company's
+    runs = research_customers(profile, limit=limit, progress=callback, **options)
+    summary = []
+    for run in runs:
+        entry = {"name": run.name, "company_number": run.company_number, "ok": run.error is None,
+                 "path": None, "error": run.error}
+        if run.result is not None:
+            path, _ = save_profile(run.result.profile, out_dir=main_path.parent)
+            entry["path"] = str(path)
+            for c in profile.customers:
+                if c.company_number == run.company_number:
+                    c.researched, c.profile_path = True, str(path)
+        summary.append(entry)
+    if runs:
+        save_profile(profile, out_file=main_path)  # record which customers were researched
+    return summary
+
+
+def _print_customers(profile: CompanyProfile, runs: list[dict] | None = None) -> None:
+    if not profile.customers:
+        return
+    matched = sum(1 for c in profile.customers if c.company_number)
+    out.print(f"Customers: {len(profile.customers)} named, {matched} matched on Companies House")
+    for c in profile.customers[:15]:
+        reg = (f" -> {c.registered_name} ({c.company_number}, {c.status}"
+               + (", likely match" if c.match == "likely" else "") + ")") if c.company_number else ""
+        done = " [green]researched[/green]" if c.researched else ""
+        evidence = f" [dim]{c.evidence}[/dim]" if c.evidence else ""
+        out.print(f"  {c.name}{reg}{evidence}{done}", highlight=False)
+    if len(profile.customers) > 15:
+        out.print(f"  [dim]and {len(profile.customers) - 15} more in the JSON file[/dim]")
+    for run in runs or []:
+        if not run["ok"]:
+            out.print(f"  [red]could not research {run['name']}: {run['error']}[/red]")
+    if matched and not any(c.researched for c in profile.customers):
+        out.print(f"  [dim]research them later with: informant customers "
+                  f"{profile.identity.company_number} --research[/dim]")
+
+
 def _print_mentions(profile: CompanyProfile) -> None:
     wm = profile.web_mentions
     if not (wm.items or wm.notes):
@@ -390,6 +450,53 @@ def _print_website(profile: CompanyProfile) -> None:
             out.print(f"  social: {', '.join(site.social_links)}")
     for note in site.notes:
         out.print(f"  [dim]note: {note}[/dim]")
+
+
+# --- customers ----------------------------------------------------------------
+
+
+@app.command("customers")
+def customers_cmd(
+    company: str = typer.Argument(..., help="Company number of a profile you've already saved."),
+    research: bool = typer.Option(False, "--research", help="Research the matched customers now."),
+    limit: int = typer.Option(5, "--limit", "-n", min=1, help="Most customers to research."),
+    out_dir: Path | None = typer.Option(
+        None, "--out", "-o", help="Folder holding the saved profile [default: INFORMANT_OUTPUT_DIR or ./output]."),
+    llm: bool = typer.Option(True, "--llm/--no-llm", help="Use an LLM for each customer."),
+    web: bool = typer.Option(True, "--web/--no-web", help="Crawl each customer's website."),
+    news: bool | None = typer.Option(None, "--news/--no-news", help="Search news for each customer."),
+    json_mode: bool = JSON_OPT,
+    progress: bool = typer.Option(False, "--progress", help="Write JSON progress events to stderr."),
+) -> None:
+    """List a saved company's customers, and optionally research them (each saved as its own profile)."""
+
+    def body() -> None:
+        number = normalise_company_number(company)
+        if number is None:
+            raise ConfigError(f"'{company}' isn't a company number.")
+        folder = (out_dir or default_output_dir()).resolve()
+        saved = load_saved_profile(folder, number)
+        if saved is None:
+            raise NotFoundError(f"No saved profile for {number} in {folder}; run `informant lookup {number}` first.")
+        profile, path = saved
+
+        runs: list[dict] = []
+        if research:
+            with _progress(progress, json_mode) as callback:
+                runs = _research_and_save_customers(
+                    profile, path, limit, dict(llm=llm, web=web, news=news), callback)
+        if json_mode:
+            print_json({"ok": True, "command": "customers", "company_number": number,
+                        "name": profile.identity.name, "path": str(path),
+                        "customers": [c.model_dump(mode="json") for c in profile.customers],
+                        "customer_research": runs})
+            return
+        if not profile.customers:
+            out.print(f"No customers recorded for {profile.identity.name}.")
+            return
+        _print_customers(profile, runs)
+
+    _run("customers", json_mode, body)
 
 
 # --- list ---------------------------------------------------------------------

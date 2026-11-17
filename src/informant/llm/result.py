@@ -6,6 +6,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from ..sources.website.extract import core_name  # imports only parsing helpers: no cycle
+
 from .prompts import (
     MERGE_SYSTEM_PROMPT,
     SECTORS,
@@ -226,7 +228,51 @@ def ground(data: WebsiteExtraction, source_text: str, notes: list[str],
         notes.append("dropped site(s) not found in the page text: " + ", ".join(gone))
     data.offices = merge_duplicate_offices(kept_offices)
     ground_history_and_funding(data, g, notes)
+    ground_customers(data, g, notes, company_name)
     return data
+
+
+# Phrases a model writes instead of a customer's name.
+_GENERIC_CUSTOMER = re.compile(
+    r"^(our |the |many |leading |major |top |large |global |uk |various |several |other )*"
+    r"(customers?|clients?|companies|businesses|brands|retailers|banks|traders|organisations?|"
+    r"organizations?|partners?|firms?|enterprises|individuals|consumers|people|public|"
+    r"government|councils?|schools?|universities)$", re.I)
+_PERSON_TITLE = re.compile(r"^(mr|mrs|ms|miss|dr|sir|dame|lord|lady)\b\.?", re.I)
+
+
+def tidy_customers(data: WebsiteExtraction, company_name: str | None = None) -> None:
+    """Drop empty, echoed and generic entries, people's titles and the company itself;
+    merge duplicates. Safe without source text."""
+    own = core_name(company_name) if company_name else ""
+    kept: dict[str, object] = {}
+    for c in data.customers:
+        name = " ".join(c.name.split()).strip(" .,;")
+        if not name or echoed(name) or _GENERIC_CUSTOMER.match(name) or _PERSON_TITLE.match(name):
+            continue
+        # Organisation names capitalise their main words; "Financial advisers throughout
+        # Australia" is a description, not a name.
+        long_words = [w for w in re.findall(r"[A-Za-z]{4,}", name)]
+        if long_words and sum(w[0].islower() for w in long_words) * 2 >= len(long_words):
+            continue
+        key = core_name(name) or _norm(name)
+        if not key or (own and key == own):
+            continue
+        c.name = name
+        c.evidence = " ".join(c.evidence.split())[:120]
+        kept.setdefault(key, c)
+    data.customers = list(kept.values())
+
+
+def ground_customers(data: WebsiteExtraction, g: Grounding, notes: list[str],
+                     company_name: str | None = None) -> None:
+    """A customer must be named in the source text: every meaningful word of its name."""
+    tidy_customers(data, company_name)
+    kept = [c for c in data.customers if g.share(c.name) == 1.0]
+    if len(kept) < len(data.customers):
+        gone = [c.name for c in data.customers if c not in kept]
+        notes.append("dropped customer(s) not named in the source text: " + ", ".join(gone))
+    data.customers = kept
 
 
 _YEAR = re.compile(r"\b(1[6-9]\d\d|20\d\d)\b")
@@ -336,4 +382,5 @@ def finish(data: WebsiteExtraction, model: str | None, notes: list[str],
         data = ground(data, source_text, notes, company_name)
     else:
         data = tidy_history_and_funding(data)
+        tidy_customers(data, company_name)
     return ExtractionResult(data, model=model, notes=notes)

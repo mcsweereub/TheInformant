@@ -57,6 +57,7 @@ STAGE_ANSWER = {
                         "source_page": "https://acme.example/investors"}],
     "shareholders": [{"name": "Northern Ventures", "stake": "20%",
                       "source_page": "https://acme.example/investors"}],
+    "customers": [],
 }
 MERGE_ANSWER = {
     "summary": "Acme makes industrial widgets for UK factories.",
@@ -67,7 +68,7 @@ MERGE_ANSWER = {
 }
 SINGLE_ANSWER = dict(MERGE_ANSWER, products=STAGE_ANSWER["products"], offices=STAGE_ANSWER["offices"],
                      key_facts=STAGE_ANSWER["key_facts"], milestones=[], funding_rounds=[],
-                     shareholders=[])
+                     shareholders=[], customers=[])
 
 
 class FakeOllama:

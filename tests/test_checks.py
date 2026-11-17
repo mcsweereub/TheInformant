@@ -25,7 +25,8 @@ OLLAMA_SHOW = "http://localhost:11434/api/show"
 def extraction(**over) -> WebsiteExtraction:
     base = dict(summary="Planlogic provides ETRM software for LNG trading.", business_model="B2B",
                 sectors=["Energy & Utilities"], tags=[], target_markets=[], products=[], offices=[],
-                key_facts=[], milestones=[], funding_rounds=[], shareholders=[])
+                key_facts=[], milestones=[], funding_rounds=[], shareholders=[],
+                customers=[])
     base.update(over)
     return WebsiteExtraction(**base)
 

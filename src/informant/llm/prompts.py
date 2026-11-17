@@ -61,7 +61,7 @@ BusinessModelField = Annotated[BusinessModel, BeforeValidator(_known_business_mo
 TagList = Annotated[list[str], _at_most(MAX_TAGS), Field(max_length=MAX_TAGS)]
 MarketList = Annotated[list[str], _at_most(MAX_MARKETS), Field(max_length=MAX_MARKETS)]
 FactList = Annotated[list[str], _at_most(MAX_FACTS), Field(max_length=MAX_FACTS)]
-MAX_MILESTONES, MAX_FUNDING, MAX_SHAREHOLDERS = 20, 15, 15
+MAX_MILESTONES, MAX_FUNDING, MAX_SHAREHOLDERS, MAX_CUSTOMERS = 20, 15, 15, 25
 
 # Shared by the single-call and per-part prompts.
 KEY_FACTS_GUIDE = (
@@ -70,7 +70,8 @@ KEY_FACTS_GUIDE = (
     "Each sentence names the company instead of saying \"they\".")
 HISTORY_AND_FUNDING_GUIDE = """List up to 20 milestones from the company's history: dated events such as its founding, launches, entering new markets, acquisitions, mergers, stock market listings, rebrands, closures and legal or regulatory events. Give the year as four digits and the event as one short sentence. Leave out events about individual people.
 List the funding rounds the text describes (investment or share sales), each with the year, the kind of round (for example seed, Series A, IPO, private placement), the amount as written, and the names of the investing organisations.
-List notable shareholders: organisations (investment funds, companies, banks, governments) that the text says own shares in the company, with the stake as written if given. Leave out individual people."""
+List notable shareholders: organisations (investment funds, companies, banks, governments) that the text says own shares in the company, with the stake as written if given. Leave out individual people.
+List up to 25 customers: organisations the text names as buying from or using the company, for example in case studies, client lists, "trusted by" logos or contract announcements. For each, give a few words saying how the text mentions it (for example "case study", "client list", "won contract"). Use each organisation's own name; leave out individual people, investors, suppliers and partners, and don't list the company itself."""
 
 SYSTEM_PROMPT = f"""You read the text of a company's own website and record facts about that company for a personal research database. You reply with JSON only.
 
@@ -88,7 +89,7 @@ List up to 15 of the main products, services or product lines, each with a one-s
 List up to 15 physical sites the company operates now that the pages name, such as offices, factories or flagship locations. For a chain with hundreds of shops, give only the headquarters and mention the shop network in the summary. Places that matter only to its history (a first shop, a former factory) belong in the milestones instead.
 {KEY_FACTS_GUIDE}
 {HISTORY_AND_FUNDING_GUIDE}
-For each product, site, milestone, funding round and shareholder, set source_page to the web address shown on the PAGE line of the page where you found it.
+For each product, site, milestone, funding round, shareholder and customer, set source_page to the web address shown on the PAGE line of the page where you found it.
 
 Every value you write must describe this particular company and come from its pages. Never copy wording from these instructions into your answer."""
 
@@ -110,6 +111,12 @@ class ExtractedFunding(BaseModel):
 class ExtractedShareholder(BaseModel):
     name: str  # an organisation
     stake: str  # as written, e.g. "about 25%", or empty
+    source_page: str
+
+
+class ExtractedCustomer(BaseModel):
+    name: str  # an organisation
+    evidence: str  # how the text mentions it: "case study", "client list"...
     source_page: str
 
 
@@ -135,6 +142,8 @@ MilestoneList = Annotated[list[ExtractedMilestone], _at_most(MAX_MILESTONES),
 FundingList = Annotated[list[ExtractedFunding], _at_most(MAX_FUNDING), Field(max_length=MAX_FUNDING)]
 ShareholderList = Annotated[list[ExtractedShareholder], _at_most(MAX_SHAREHOLDERS),
                             Field(max_length=MAX_SHAREHOLDERS)]
+CustomerList = Annotated[list[ExtractedCustomer], _at_most(MAX_CUSTOMERS),
+                         Field(max_length=MAX_CUSTOMERS)]
 
 
 class WebsiteExtraction(BaseModel):
@@ -149,6 +158,7 @@ class WebsiteExtraction(BaseModel):
     milestones: MilestoneList
     funding_rounds: FundingList
     shareholders: ShareholderList
+    customers: CustomerList
 
 
 # --- staged extraction: notes per part, then one merge ------------------------
@@ -169,7 +179,7 @@ Products: up to 15 of the products, services or product lines this part mentions
 Sites: up to 15 physical sites the company operates now that this part names, such as offices, factories or flagship locations. Places that matter only to its history belong in the milestones instead.
 Target markets: the kinds of customers or the regions the company sells to.
 """ + HISTORY_AND_FUNDING_GUIDE + """
-For each product, site, milestone, funding round and shareholder, set source_page to the web address shown on the PAGE line of the page where you found it.
+For each product, site, milestone, funding round, shareholder and customer, set source_page to the web address shown on the PAGE line of the page where you found it.
 
 Every value you write must describe this particular company and come from this text. Never copy wording from these instructions into your answer."""
 
@@ -182,6 +192,7 @@ class ChunkFindings(BaseModel):
     milestones: MilestoneList
     funding_rounds: FundingList
     shareholders: ShareholderList
+    customers: CustomerList
 
 
 MERGE_SYSTEM_PROMPT = f"""You combine research notes about a company into a short profile for a personal research database. You reply with JSON only.

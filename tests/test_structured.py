@@ -122,7 +122,7 @@ def test_llm_receives_the_declared_facts_first(monkeypatch):
                                "business_model": "B2C", "sectors": ["Food & Drink Retail"],
                                "tags": ["bakery"], "target_markets": [], "products": [], "offices": [],
                                "key_facts": [], "milestones": [], "funding_rounds": [],
-                               "shareholders": []})}})
+                               "shareholders": [], "customers": []})}})
     profile = CompanyProfile(query="x", identity=Identity(name="ACME BAKERIES LIMITED"))
     with Crawler(delay=0) as c:
         research_website(profile, crawler=c, user_url="https://acme.example/")
