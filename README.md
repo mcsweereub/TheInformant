@@ -224,6 +224,39 @@ Analytics and tag IDs found in the pages (`website.analytics_ids`) link companie
 `index.json`: `shares_analytics_with` names saved companies whose sites carry the same
 ID, which usually means the same organisation runs both.
 
+## Property (HM Land Registry)
+
+`property` lists the land and buildings in England and Wales registered to the company,
+from HM Land Registry's "UK companies that own property" dataset (formerly CCOD): title
+number, freehold or leasehold, address, region, price paid (when recorded), the date the
+company became owner, its address on the title, and any other organisations on the title.
+Totals cover freehold/leasehold counts, recorded prices, regions and acquisition dates.
+Titles match on company number (plus entries filed without a number under the exact
+current or previous name). Other UK companies in the group (as for donations) get totals
+in `group`. The dataset covers titles owned by companies and other organisations only,
+never private individuals. Prices are what was paid when the company became owner, not
+today's values, and many titles have none.
+
+It needs a free account at use-land-property-data.service.gov.uk (accept the licence for
+the UK companies dataset) and its API key in `.env` as `LAND_REGISTRY_API_KEY`. The data
+is published monthly as one full file (about 4.5 million titles, 1.6 GB of CSV) plus a
+change-only file, so it is kept locally in a SQLite database (`.informant_data/`, or
+`INFORMANT_DATA_DIR`; `informant cache --clear` leaves it alone):
+
+```bash
+uv run informant property --update         # first time: downloads the full file and builds the database
+uv run informant property --update         # later: applies each new monthly change file
+uv run informant property --update --full  # rebuild from the latest full file
+uv run informant property                  # what the local copy holds
+uv run informant property 00502851         # one company's titles, from the local copy
+```
+
+During a lookup, the local copy is checked for a newer month at most once a day, and
+change files are applied automatically (seconds). A lookup never downloads the full file:
+if change files can't bridge the gap, it says to run `--update --full`. Without a local
+copy, the section is empty with a note. Skip it with `--skip property`. The first titles
+also go to the LLM as material (where the company's sites are).
+
 ## News
 
 Recent headlines that name the company (default: the last 90 days, up to 20 articles).
@@ -271,6 +304,32 @@ uv run informant cache --clear                # empty it (--pages or --llm for o
 `INFORMANT_CACHE=off` turns it off. The cache holds copies of public web pages; it's
 ignored by git.
 
+## Change tracking
+
+Every save also keeps a dated copy of the profile in `history/<company number>/` next to
+it (the newest 50 per company). The first time, the profile already saved becomes the
+starting point, so changes show from the next lookup. After each lookup the CLI lists
+what changed since the previous one:
+
+```
+uv run informant changes 09461711                     # latest lookup vs the one before
+uv run informant changes 09461711 --since 2026-10-01  # vs the last lookup on or before a date
+```
+
+Changes are read section by section: name, status, registered office, SIC codes,
+appointments and resignations, people with significant control, new filings, overdue
+flags, new accounts and restated figures, charges (new or satisfied), share capital
+filings, the owner chain, risk flags, the LEI record, contract awards, donations and the
+accounts' statement on them, property titles bought or sold (title by title when all are
+listed, else the count; group companies' counts), open roles, the email provider, subdomains and services, the
+website's technology, products, customers and news. Timestamps and sources are ignored.
+A section is compared only when both lookups checked it, so a `--no-web` run doesn't
+report the website as gone; those are listed under `not_compared`.
+
+`lookup --json` includes the comparison as `changes` (null for a first lookup), and each
+`index.json` entry has `lookups`, `previous_lookup_at` and `changes_since_previous`.
+`INFORMANT_HISTORY=off` turns it off.
+
 ## Output format
 
 Defined in [src/informant/schema.py](src/informant/schema.py). Every section is
@@ -305,6 +364,7 @@ always present (empty when not yet populated), and every section carries
 | public_contracts | Contracts Finder       | done    |
 | political_donations | Electoral Commission | done   |
 | domain           | DNS, cert logs, Wayback| done    |
+| property         | HM Land Registry (CCOD)| done    |
 
 ## Using TheInformant from other programs
 

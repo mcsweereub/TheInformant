@@ -50,6 +50,13 @@ from .sources.contracts import contracts_material, fetch_contracts
 from .sources.donations import fetch_donations, fetch_group_donations
 from .sources.domain import fetch_domain_signals
 from .sources.gleif import fetch_lei
+from .sources.land_registry import (
+    PropertyStore,
+    fetch_group_property,
+    fetch_property,
+    keep_current,
+    property_material,
+)
 from .sources.jobs import fetch_jobs, find_boards, jobs_material
 from .sources.website.feeds import feeds_material, shopify_catalogue, wordpress_posts
 from .sources.website.parse import CrawlResult
@@ -66,7 +73,8 @@ REGISTRY_DEPTHS = ("full", "basic")
 #   feeds      the site's WordPress posts / Shopify catalogue
 #   domain     DNS records, certificate logs and the Wayback Machine
 #   donations  political donations it made (Electoral Commission register)
-OPTIONAL_SOURCES = ("gleif", "contracts", "donations", "jobs", "feeds", "domain")
+#   property   land and buildings it owns in England and Wales (HM Land Registry; local copy)
+OPTIONAL_SOURCES = ("gleif", "contracts", "donations", "property", "jobs", "feeds", "domain")
 _OFF = {"0", "off", "false", "no"}
 
 
@@ -216,6 +224,12 @@ def research_company(
         research_donations(profile, cache=api_cache, progress=progress)
     else:
         emit(progress, "donations", "skipped", "Political donations skipped")
+    if "property" not in skipped:
+        property_page = research_property(profile, progress=progress)
+        if property_page is not None:
+            extra.append(property_page)
+    else:
+        emit(progress, "property", "skipped", "Property ownership skipped")
 
     if web:
         own_crawler = crawler is None
@@ -644,6 +658,36 @@ def research_donations(profile: CompanyProfile, *, cache=None,
     emit(progress, "donations", "done", f"{pd.found} donation(s)"
          + (f", {in_group} by group companies" if in_group else ""),
          found=pd.found, total_value=pd.total_value, group_found=in_group)
+
+
+def research_property(profile: CompanyProfile, *, store: PropertyStore | None = None,
+                      progress: ProgressFn | None = None):
+    """Fill profile.property from the local copy of HM Land Registry's companies dataset
+    (applying a newer monthly change file first, at most once a day), with totals for the
+    rest of the group. Returns LLM material (or None)."""
+    store = store or PropertyStore()
+    if not store.exists():
+        emit(progress, "property", "skipped", "No local Land Registry data "
+                                               "(run `informant property --update`)")
+        profile.property = fetch_property(None, store=store)  # carries the how-to note
+        return None
+    emit(progress, "property", "started", "Reading Land Registry ownership data")
+    note = keep_current(store, notify=lambda m: emit(progress, "property", "progress", m))
+    ident = profile.identity
+    names = [ident.name] + [p.name for p in ident.previous_names]
+    holdings = fetch_property(ident.company_number, names, store=store)
+    if note:
+        holdings.notes.append(note)
+    group = group_companies(profile)
+    if group:
+        holdings.group = fetch_group_property(group, store=store)
+        holdings.group_searched = [f"{name} ({number}, {relation})" for number, name, relation in group]
+    profile.property = holdings
+    in_group = sum(g.titles for g in holdings.group)
+    emit(progress, "property", "done", f"{holdings.found} title(s)"
+         + (f", {in_group} owned by group companies" if in_group else ""),
+         found=holdings.found, group_titles=in_group)
+    return property_material(holdings)
 
 
 def group_companies(profile: CompanyProfile) -> list[tuple[str, str, str]]:

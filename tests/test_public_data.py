@@ -300,7 +300,7 @@ def test_skipped_sources(monkeypatch):
     monkeypatch.setenv("INFORMANT_SKIP", "jobs, domain")
     assert skipped_sources() == {"jobs", "domain"}
     assert skipped_sources(["gleif,contracts", "feeds"]) == {"gleif", "contracts", "feeds"}
-    assert skipped_sources(["all"]) == {"gleif", "contracts", "donations", "jobs", "feeds", "domain"}
+    assert skipped_sources(["all"]) == {"gleif", "contracts", "donations", "property", "jobs", "feeds", "domain"}
     assert skipped_sources([]) == set()
     with pytest.raises(ConfigError):
         skipped_sources(["linkedin"])

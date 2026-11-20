@@ -2,7 +2,7 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def no_cache_by_default(monkeypatch):
+def no_cache_by_default(monkeypatch, tmp_path_factory):
     """Tests must not share cached pages or LLM answers with each other (or leave a
     cache folder in the repo). Cache tests switch it back on with a temp folder."""
     monkeypatch.setenv("INFORMANT_CACHE", "off")
@@ -29,3 +29,7 @@ def no_cache_by_default(monkeypatch):
     # DNS/certificates/Wayback) are tested in test_public_data.py.
     monkeypatch.setenv("INFORMANT_SKIP", "all")
     monkeypatch.delenv("GUARDIAN_API_KEY", raising=False)
+    # Land Registry: never the real key or the user's downloaded copy (test_property.py
+    # builds small ones in temp folders).
+    monkeypatch.delenv("LAND_REGISTRY_API_KEY", raising=False)
+    monkeypatch.setenv("INFORMANT_DATA_DIR", str(tmp_path_factory.mktemp("informant_data")))

@@ -38,9 +38,16 @@ from .pipeline import (
     skipped_sources,
 )
 from .sources.companies_house import normalise_company_number
+from .sources import land_registry
 from .progress import ProgressEvent, emit
 from .schema import SCHEMA_VERSION, CompanyProfile
-from .storage import default_output_dir, load_index, load_saved_profile, save_profile
+from .storage import (
+    compare_snapshots,
+    default_output_dir,
+    load_index,
+    load_saved_profile,
+    save_profile,
+)
 
 app = typer.Typer(add_completion=False, help="Research UK companies into structured JSON.")
 out = Console()  # results for people (stdout)
@@ -208,6 +215,8 @@ def lookup(
             emit(callback, "save", "started", "Saving profile")
             path, index_path = save_profile(result.profile, out_dir=out_dir, out_file=out_file)
             emit(callback, "save", "done", str(path), path=str(path))
+            number = result.profile.identity.company_number
+            comparison = compare_snapshots(path.parent, number) if number else None
             runs = []
             if with_customers:
                 runs = _research_and_save_customers(result.profile, path, with_customers, kwargs,
@@ -229,6 +238,7 @@ def lookup(
                 "alternatives": [asdict(h) for h in result.alternatives],
                 "warnings": profile.website.notes,
                 "customer_research": runs,
+                "changes": comparison.model_dump(mode="json") if comparison else None,
                 "profile": profile.model_dump(mode="json"),
             })
             return
@@ -249,6 +259,7 @@ def lookup(
         _print_news(profile)
         _print_mentions(profile)
         _print_customers(profile, runs)
+        _print_changes(comparison, limit=12)
         active = sum(1 for o in profile.people.officers if o.active)
         out.print(
             f"[green]Wrote {path}[/green]  "
@@ -424,6 +435,7 @@ def _print_public_records(profile: CompanyProfile) -> None:
         out.print(f"  accounts say: [italic]{pd.accounts_statement}[/italic]", highlight=False)
     for note in pd.notes:
         out.print(f"  [dim]donations: {note}[/dim]")
+    _print_property(profile.property)
     h = profile.hiring
     if h.provider:
         depts = ", ".join(f"{d} ({n})" for d, n in list(h.departments.items())[:6])
@@ -453,6 +465,29 @@ def _print_public_records(profile: CompanyProfile) -> None:
                       highlight=False)
         for note in d.notes:
             out.print(f"  [dim]domain: {note}[/dim]")
+
+
+def _print_property(p, limit: int = 6) -> None:
+    if p.found:
+        paid = (f"; {_money(p.total_price_paid)} paid for the {p.priced_titles} with a recorded price"
+                if p.total_price_paid else "")
+        regions = ", ".join(f"{r} ({n})" for r, n in list(p.regions.items())[:4])
+        out.print(f"Property: {p.found} title(s) in England and Wales ({p.freehold} freehold, "
+                  f"{p.leasehold} leasehold){paid}" + (f"; {regions}" if regions else ""),
+                  highlight=False)
+        for t in p.items[:limit]:
+            since = f"{t.owner_since:%Y}" if t.owner_since else "    "
+            price = f" {_money(t.price_paid)}" if t.price_paid else ""
+            out.print(f"  {since}  {(t.tenure or '')[:9]:<9} {(t.address or t.title_number)[:90]}"
+                      f"{price}", highlight=False)
+    elif p.group:
+        out.print("Property: none registered to the company itself")
+    for g in p.group:
+        out.print(f"  owned by its {g.relation} {g.name} ({g.company_number}): {g.titles} title(s)"
+                  + (f", {_money(g.total_price_paid)} recorded" if g.total_price_paid else ""),
+                  highlight=False)
+    for note in p.notes:
+        out.print(f"  [dim]property: {note}[/dim]")
 
 
 def _print_customers(profile: CompanyProfile, runs: list[dict] | None = None) -> None:
@@ -528,6 +563,69 @@ def _print_website(profile: CompanyProfile) -> None:
             out.print(f"  social: {', '.join(site.social_links)}")
     for note in site.notes:
         out.print(f"  [dim]note: {note}[/dim]")
+
+
+def _print_changes(comparison, limit: int | None = None) -> None:
+    if comparison is None:
+        return
+    when = f"{comparison.previous_at:%Y-%m-%d %H:%M}"
+    if not comparison.changes:
+        out.print(f"No changes since the lookup on {when}.")
+    else:
+        out.print(f"Changes since the lookup on {when}: {len(comparison.changes)}")
+        marks = {"added": "[green]+[/green]", "removed": "[red]-[/red]", "changed": "[yellow]~[/yellow]"}
+        shown = comparison.changes[:limit] if limit else comparison.changes
+        for c in shown:
+            out.print(f"  {marks[c.kind]} [dim]{c.section:<19}[/dim] {c.summary}", highlight=False)
+        if len(shown) < len(comparison.changes):
+            out.print(f"  [dim]and {len(comparison.changes) - len(shown)} more: informant changes "
+                      f"{comparison.company_number}[/dim]")
+    if comparison.not_compared:
+        out.print(f"  [dim]not compared (only one of the two lookups checked them): "
+                  f"{', '.join(comparison.not_compared)}[/dim]")
+
+
+# --- changes ------------------------------------------------------------------
+
+
+@app.command("changes")
+def changes_cmd(
+    company: str = typer.Argument(..., help="Company number of a profile you've saved at least twice."),
+    since: str | None = typer.Option(
+        None, "--since", help="Compare with the last lookup on or before this date (YYYY-MM-DD) "
+        "instead of the one before the latest."),
+    out_dir: Path | None = typer.Option(
+        None, "--out", "-o", help="Folder holding the saved profile [default: INFORMANT_OUTPUT_DIR or ./output]."),
+    json_mode: bool = JSON_OPT,
+) -> None:
+    """Show what changed between the latest lookup of a company and an earlier one."""
+
+    def body() -> None:
+        from datetime import datetime, timezone
+
+        number = normalise_company_number(company)
+        if number is None:
+            raise ConfigError(f"'{company}' isn't a company number.")
+        when = None
+        if since:
+            try:
+                when = datetime.strptime(since, "%Y-%m-%d").replace(hour=23, minute=59, second=59,
+                                                                    tzinfo=timezone.utc)
+            except ValueError:
+                raise ConfigError("--since must be a date like 2026-11-01.") from None
+        folder = (out_dir or default_output_dir()).resolve()
+        comparison = compare_snapshots(folder, number, since=when)
+        if comparison is None:
+            raise NotFoundError(f"Fewer than two saved lookups of {number} in {folder / 'history'}; "
+                                f"run `informant lookup {number}` again later to compare.")
+        if json_mode:
+            print_json({"ok": True, "command": "changes", "company_number": number,
+                        **comparison.model_dump(mode="json")})
+            return
+        out.print(f"[bold]{comparison.name}[/bold] ({number})")
+        _print_changes(comparison)
+
+    _run("changes", json_mode, body)
 
 
 # --- customers ----------------------------------------------------------------
@@ -724,6 +822,66 @@ def cache_cmd(
             out.print(f"  {label}: {s['entries']} ({s['bytes'] / 1_048_576:.1f} MB)")
 
     _run("cache", json_mode, body)
+
+
+@app.command("property")
+def property_cmd(
+    company: str | None = typer.Argument(None, help="Company number to show (local data only)."),
+    do_update: bool = typer.Option(False, "--update",
+                                   help="Download the dataset (first time) or apply new monthly changes."),
+    full: bool = typer.Option(False, "--full", help="With --update: rebuild from the latest full file."),
+    json_mode: bool = JSON_OPT,
+) -> None:
+    """HM Land Registry's companies-that-own-property dataset: status, update, or one company."""
+
+    def body() -> None:
+        store = land_registry.PropertyStore()
+        result = None
+        if do_update or full:
+            notify = None if json_mode else (lambda m: err.print(f"[dim]{m}[/dim]"))
+            result = land_registry.update(store, full=full, notify=notify)
+        if company:
+            number = normalise_company_number(company)
+            if not store.exists():
+                raise NotFoundError("no local Land Registry data: run `informant property --update`")
+            holdings = land_registry.fetch_property(number, store=store)
+            if json_mode:
+                print_json({"ok": True, "command": "property", "company_number": number,
+                            "update": result, "property": holdings.model_dump(mode="json")})
+                return
+            if not holdings.found:
+                out.print(f"No titles registered to company number {number}.")
+            _print_property(holdings, limit=40)
+            return
+        meta = store.meta()
+        status = {"path": str(store.path), "exists": store.exists(),
+                  "dataset": meta.get("dataset") or None, "month": meta.get("month") or None,
+                  "published": meta.get("published") or None,
+                  "titles": int(meta["titles"]) if meta.get("titles") else None,
+                  "changes_applied": [c for c in (meta.get("changes") or "").split(",") if c],
+                  "updated_at": meta.get("updated_at") or None,
+                  "bytes": store.path.stat().st_size if store.exists() else 0,
+                  "api_key_set": land_registry.api_key() is not None}
+        if json_mode:
+            print_json({"ok": True, "command": "property", "update": result, **status})
+            return
+        if result:
+            what = {"none": "already up to date", "changes": "applied " + ", ".join(result["files"]),
+                    "full": "built from " + ", ".join(result["files"])}[result["action"]]
+            out.print(f"[green]Land Registry data {what}.[/green]")
+        if not status["exists"]:
+            out.print("No local Land Registry data. Run `informant property --update` "
+                      "(downloads the full monthly file once, then small monthly changes).")
+            if not status["api_key_set"]:
+                out.print("[yellow]LAND_REGISTRY_API_KEY is not set.[/yellow]")
+            return
+        out.print(f"Land Registry data: {status['titles']:,} titles, month {status['month']} "
+                  f"(published {status['published']}), {status['bytes'] / 1_073_741_824:.2f} GB")
+        out.print(f"  {status['path']}  [dim]built from {meta.get('base')}"
+                  + (f", then {len(status['changes_applied'])} change file(s)" if status["changes_applied"] else "")
+                  + "[/dim]")
+
+    _run("property", json_mode, body)
 
 
 # --- schema / version ---------------------------------------------------------

@@ -18,7 +18,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, PrivateAttr
 
-SCHEMA_VERSION = "0.14.0"
+SCHEMA_VERSION = "0.15.0"
 
 SourceName = Literal[
     "companies_house",
@@ -32,6 +32,7 @@ SourceName = Literal[
     "certificates",
     "wayback",
     "electoral_commission",
+    "land_registry",
     "other",
 ]
 
@@ -668,6 +669,64 @@ class Domain(Sourced):
     notes: list[str] = Field(default_factory=list)
 
 
+class CoOwner(BaseModel):
+    name: str
+    company_number: str | None = None
+    category: str | None = None  # e.g. "Limited Company or Public Limited Company"
+
+
+class PropertyTitle(BaseModel):
+    """A registered title (land or building) in England and Wales owned by the company,
+    from HM Land Registry's "UK companies that own property" dataset."""
+
+    title_number: str
+    tenure: str | None = None  # Freehold / Leasehold
+    address: str | None = None
+    district: str | None = None
+    county: str | None = None
+    region: str | None = None
+    postcode: str | None = None
+    multiple_addresses: bool = False  # the title covers more addresses than shown
+    price_paid: float | None = None  # GBP, when the register records one
+    owner_since: date | None = None  # "Date Proprietor Added"
+    owner_address: str | None = None  # the company's address on the title (for notices)
+    co_owners: list[CoOwner] = Field(default_factory=list)  # other organisations on the title
+    matched_by: Literal["company_number", "name"] = "company_number"
+
+
+class GroupProperty(BaseModel):
+    name: str
+    company_number: str
+    relation: Literal["parent", "subsidiary"]
+    titles: int = 0
+    freehold: int = 0
+    leasehold: int = 0
+    total_price_paid: float | None = None
+    regions: dict[str, int] = Field(default_factory=dict)
+
+
+class PropertyHoldings(Sourced):
+    """Land and buildings in England and Wales registered to the company. The dataset covers
+    titles owned by companies and other organisations only, never private individuals.
+    Prices are what was paid when the company was registered as owner (often blank), not
+    current values."""
+
+    dataset: str | None = None  # file the local copy was built from, e.g. CCOD_FULL_2026_11.zip
+    data_as_of: date | None = None  # when HM Land Registry published that data
+    found: int = 0
+    freehold: int = 0
+    leasehold: int = 0
+    total_price_paid: float | None = None  # sum of the recorded prices
+    priced_titles: int = 0  # how many titles have a recorded price
+    regions: dict[str, int] = Field(default_factory=dict)  # region -> titles
+    first_acquired: date | None = None
+    last_acquired: date | None = None
+    items: list[PropertyTitle] = Field(default_factory=list)  # newest first, capped
+    group: list[GroupProperty] = Field(default_factory=list)  # only companies owning titles
+    group_searched: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
 # --- top level ------------------------------------------------------------
 
 
@@ -702,6 +761,7 @@ class CompanyProfile(BaseModel):
     public_contracts: PublicContracts = Field(default_factory=PublicContracts)
     political_donations: PoliticalDonations = Field(default_factory=PoliticalDonations)
     domain: Domain = Field(default_factory=Domain)
+    property: PropertyHoldings = Field(default_factory=PropertyHoldings)
 
     def to_json(self) -> str:
         return self.model_dump_json(indent=2)
