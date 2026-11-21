@@ -173,10 +173,8 @@ def load_saved_profile(folder: Path, company_number: str) -> tuple[CompanyProfil
     for entry in load_index(folder)["companies"]:
         if entry.get("company_number") == company_number and entry.get("file"):
             path = folder / entry["file"]
-            try:
-                return CompanyProfile.model_validate_json(path.read_text(encoding="utf-8")), path
-            except (OSError, ValidationError, ValueError):
-                return None
+            profile = load_profile_file(path)
+            return (profile, path) if profile is not None else None
     return None
 
 
@@ -186,10 +184,9 @@ def rebuild_index(folder: Path) -> dict[str, Any]:
         for file in sorted(folder.glob("*.json")):
             if file.name == INDEX_NAME:
                 continue
-            try:
-                profile = CompanyProfile.model_validate_json(file.read_text(encoding="utf-8"))
-            except (OSError, ValidationError, ValueError):
-                continue  # not a profile (or from an incompatible schema)
+            profile = load_profile_file(file)
+            if profile is None:
+                continue  # not a profile (e.g. graph.json), or unusable
             index["companies"].append(index_entry(profile, file.name,
                                                   history_summary(folder, profile.identity.company_number)))
         _write_index(folder, index)
@@ -247,10 +244,36 @@ def list_snapshots(folder: Path, company_number: str | None) -> list[Path]:
     return sorted(d.glob("*.json")) if d.is_dir() else []
 
 
-def load_profile_file(path: Path) -> CompanyProfile | None:
+def load_profile_file(path: Path, lenient: bool = True) -> CompanyProfile | None:
+    """A saved profile, or None. With `lenient`, a profile from an older schema still
+    loads: top-level sections that no longer fit (e.g. `news` was once a list) are left
+    empty instead of rejecting the whole file."""
     try:
-        return CompanyProfile.model_validate_json(path.read_text(encoding="utf-8"))
-    except (OSError, ValidationError, ValueError):
+        text = path.read_text(encoding="utf-8")
+        return CompanyProfile.model_validate_json(text)
+    except OSError:
+        return None
+    except (ValidationError, ValueError) as e:
+        if not lenient or not isinstance(e, ValidationError):
+            return None
+        return _load_older(text, e)
+
+
+def _load_older(text: str, error: ValidationError) -> CompanyProfile | None:
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    broken = {err["loc"][0] for err in error.errors() if err.get("loc")}
+    if broken & {"identity", "query"}:
+        return None  # not a profile we can use
+    for key in broken:
+        data.pop(key, None)
+    try:
+        return CompanyProfile.model_validate(data)
+    except ValidationError:
         return None
 
 

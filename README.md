@@ -330,6 +330,41 @@ report the website as gone; those are listed under `not_compared`.
 `index.json` entry has `lookups`, `previous_lookup_at` and `changes_since_previous`.
 `INFORMANT_HISTORY=off` turns it off.
 
+## Relationship graph
+
+`informant graph` reads every saved profile in the folder and writes `graph.json`: one
+list of organisations (nodes) and one of links between them (edges), each edge with its
+evidence, the source data and which profiles reported it.
+
+| Edge | From |
+|------|------|
+| `owns` | the PSC ownership chain, the LEI direct parent, LEI subsidiaries |
+| `ultimate_parent_of` | the LEI ultimate parent |
+| `shares_officers` | current officers in common (Companies House; undirected) |
+| `supplies` | named customers, and public-sector buyers (with award count and value won alone) |
+| `invests_in` | funding-round investors and organisational shareholders |
+| `donated_to` | donations to parties and campaign groups (the company's and its group's) |
+| `co_owns_property_with` | organisations on the same Land Registry titles (undirected) |
+| `shares_analytics_with` | saved companies whose sites carry the same analytics ID (undirected) |
+
+Only organisations are nodes, never people: shared officers are an edge between the two
+companies (their names, from Companies House, are the evidence), and donations to
+individual politicians are left out. Nodes with a company number have the id
+`ch:<number>`; a name-only mention (an investor, a customer) joins a numbered node with
+exactly the same legal name, else stays `org:`, `body:` (public buyer) or `party:`.
+Saved companies have `saved: true`.
+
+```bash
+uv run informant graph                    # build graph.json, show counts per link type
+uv run informant graph 00502851           # one company's links, and paths to other saved companies
+uv run informant graph 00502851 --hops 3  # search further
+```
+
+With two saved profiles that never mention each other, it still finds the connection,
+e.g. Greggs and Softcat share a director. Paths go through any node, so two companies
+selling to the same council, or donating to the same party, are connected in two steps.
+Profiles saved with older schemas are read too (sections that no longer fit are left out).
+
 ## Output format
 
 Defined in [src/informant/schema.py](src/informant/schema.py). Every section is

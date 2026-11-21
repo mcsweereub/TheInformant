@@ -78,6 +78,12 @@ def main(
 
 
 def print_json(obj: dict[str, Any]) -> None:
+    # Always UTF-8: on Windows a piped stdout defaults to the console code page (cp1252),
+    # which can't encode characters such as "→" in a headline and would crash the output.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError, OSError):
+        pass
     sys.stdout.write(json.dumps(obj, ensure_ascii=False, default=str) + "\n")
     sys.stdout.flush()
 
@@ -702,6 +708,70 @@ def list_cmd(
         out.print(table)
 
     _run("list", json_mode, body)
+
+
+@app.command("graph")
+def graph_cmd(
+    company: str | None = typer.Argument(
+        None, help="Company number or exact name: show its links and paths to other saved companies."),
+    hops: int = typer.Option(2, "--hops", min=1, max=4,
+                             help="With a company: how many steps to search for other saved companies."),
+    out_dir: Path | None = typer.Option(
+        None, "--out", "-o", help="Profiles folder [default: INFORMANT_OUTPUT_DIR or ./output]."),
+    json_mode: bool = JSON_OPT,
+) -> None:
+    """Build graph.json (every link between companies and organisations in the folder)."""
+    from . import graph as g
+
+    def body() -> None:
+        folder = (out_dir or default_output_dir()).resolve()
+        built, path = g.save_graph(folder)
+        summary = g.stats(built)
+        if company is None:
+            if json_mode:
+                print_json({"ok": True, "command": "graph", "path": str(path), **summary})
+                return
+            out.print(f"Graph: {summary['nodes']} organisations, {summary['edges']} links, from "
+                      f"{summary['companies_saved']} saved profile(s) -> {path}")
+            for kind, n in sorted(summary["edge_types"].items(), key=lambda x: -x[1]):
+                out.print(f"  {n:>5}  {kind.replace('_', ' ')}")
+            return
+        node = g.find_node(built, company)
+        if node is None:
+            raise NotFoundError(f"{company!r} is not in the graph of {folder}")
+        links = g.neighbours(built, node.id)
+        paths = [c for c in g.connections(built, node.id, max_hops=hops)]
+        if json_mode:
+            print_json({"ok": True, "command": "graph", "path": str(path), "node": node.model_dump(),
+                        "links": [{"other": x["other"].model_dump(), "outgoing": x["outgoing"],
+                                   "edge": x["edge"].model_dump(mode="json")} for x in links],
+                        "connections": [{"company": c["company"].model_dump(),
+                                         "path": [{"edge": e.model_dump(mode="json"), "to": n.model_dump()}
+                                                  for e, n in c["path"]]} for c in paths]})
+            return
+        out.print(f"[bold]{node.name}[/bold] ({node.company_number or node.kind}): {len(links)} link(s)",
+                  highlight=False)
+        current = None
+        for x in links:
+            e = x["edge"]
+            if e.type != current:
+                current = e.type
+                out.print(f"  [bold]{e.type.replace('_', ' ')}[/bold]")
+            arrow = "->" if not e.directed else ("->" if x["outgoing"] else "<-")
+            other = x["other"]
+            tag = " [green](saved)[/green]" if other.saved else ""
+            reason = f" [dim]{e.evidence[0]}[/dim]" if e.evidence else ""
+            out.print(f"    {arrow} {other.name}{f' ({other.company_number})' if other.company_number else ''}"
+                      f"{tag}{reason}", highlight=False)
+        if paths:
+            out.print(f"[bold]Connected saved companies (within {hops} steps)[/bold]")
+            for c in paths:
+                steps = "; ".join(g.describe_edge(e, built) for e, _ in c["path"])
+                out.print(f"  {c['company'].name}: {steps}", highlight=False)
+        else:
+            out.print(f"[dim]No other saved company within {hops} steps.[/dim]")
+
+    _run("graph", json_mode, body)
 
 
 # --- model --------------------------------------------------------------------
