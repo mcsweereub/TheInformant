@@ -51,16 +51,21 @@ from .sources.donations import fetch_donations, fetch_group_donations
 from .sources.domain import fetch_domain_signals
 from .sources.gleif import fetch_lei
 from .sources.land_registry import (
+    OVERSEAS,
     PropertyStore,
     fetch_group_property,
+    fetch_overseas_group_property,
     fetch_property,
+    is_overseas_number,
+    is_uk,
     keep_current,
     property_material,
 )
 from .sources.jobs import fetch_jobs, find_boards, jobs_material
 from .sources.website.feeds import feeds_material, shopify_catalogue, wordpress_posts
 from .sources.website.parse import CrawlResult
-from .sources.website.extract import site_host
+from .sources import land_registry
+from .sources.website.extract import legal_key, site_host
 from .sources.website.fetch import Crawler
 from .sources.website.parse import Page
 from .sources.website.research import extract_from_material, research_website
@@ -661,27 +666,50 @@ def research_donations(profile: CompanyProfile, *, cache=None,
 
 
 def research_property(profile: CompanyProfile, *, store: PropertyStore | None = None,
+                      overseas_store: PropertyStore | None = None,
                       progress: ProgressFn | None = None):
-    """Fill profile.property from the local copy of HM Land Registry's companies dataset
-    (applying a newer monthly change file first, at most once a day), with totals for the
-    rest of the group. Returns LLM material (or None)."""
+    """Fill profile.property from the local copies of HM Land Registry's UK and overseas
+    companies datasets (applying newer monthly change files first, at most once a day),
+    with totals for the rest of the group: UK group companies by number, overseas ones by
+    exact name and country. Returns LLM material (or None)."""
     store = store or PropertyStore()
-    if not store.exists():
+    overseas_store = overseas_store or PropertyStore(dataset=OVERSEAS)
+    ident = profile.identity
+    # an overseas company registered here (FC/OE number) is in the overseas dataset
+    is_overseas = is_overseas_number(ident.company_number)
+    own_store = overseas_store if is_overseas else store
+    if not store.exists() and not overseas_store.exists():
         emit(progress, "property", "skipped", "No local Land Registry data "
                                                "(run `informant property --update`)")
         profile.property = fetch_property(None, store=store)  # carries the how-to note
         return None
     emit(progress, "property", "started", "Reading Land Registry ownership data")
-    note = keep_current(store, notify=lambda m: emit(progress, "property", "progress", m))
-    ident = profile.identity
+    notify = lambda m: emit(progress, "property", "progress", m)  # noqa: E731
+    notes = [n for s in (store, overseas_store) if s.exists() for n in [keep_current(s, notify)] if n]
     names = [ident.name] + [p.name for p in ident.previous_names]
-    holdings = fetch_property(ident.company_number, names, store=store)
-    if note:
-        holdings.notes.append(note)
-    group = group_companies(profile)
+    holdings = fetch_property(ident.company_number, names, store=own_store)
+    holdings.notes.extend(notes)
+    group = group_companies(profile) if store.exists() else []
     if group:
         holdings.group = fetch_group_property(group, store=store)
         holdings.group_searched = [f"{name} ({number}, {relation})" for number, name, relation in group]
+    abroad = overseas_group_companies(profile) if overseas_store.exists() else []
+    if abroad:
+        found, found_notes = fetch_overseas_group_property(abroad, overseas_store)
+        holdings.group.extend(found)
+        holdings.notes.extend(found_notes)
+        holdings.group_searched += [f"{name} ({country or 'overseas'}, {relation})"
+                                    for _, name, country, relation in abroad]
+    if overseas_store.exists() and (abroad or is_overseas):
+        meta = overseas_store.meta()
+        holdings.overseas_dataset = meta.get("dataset") or None
+        holdings.overseas_data_as_of = land_registry.date_or_none(meta.get("published"))
+        if is_overseas and store.exists():
+            uk_meta = store.meta()
+            holdings.dataset = uk_meta.get("dataset") or None
+            holdings.data_as_of = land_registry.date_or_none(uk_meta.get("published"))
+        if not any(s.url == land_registry.dataset_page(OVERSEAS) for s in holdings.sources):
+            holdings.sources.append(land_registry.source_for(overseas_store, meta))
     profile.property = holdings
     in_group = sum(g.titles for g in holdings.group)
     emit(progress, "property", "done", f"{holdings.found} title(s)"
@@ -710,3 +738,31 @@ def group_companies(profile: CompanyProfile) -> list[tuple[str, str, str]]:
     for child in lei.subsidiaries:
         add(child.company_number, child.name, "subsidiary")
     return list(out.values())
+
+
+MAX_OVERSEAS_GROUP = 12
+
+
+def overseas_group_companies(profile: CompanyProfile) -> list[tuple[str | None, str, str | None, str]]:
+    """Group companies incorporated outside the UK, as (FC/OE number or None, name, country,
+    relation): corporate owners in the PSC chain registered abroad, and LEI parents and
+    subsidiaries whose legal address is outside the UK. Entries of unknown country are
+    left out (they can't be told apart from UK companies)."""
+    own = legal_key(profile.identity.name)
+    out: dict[str, tuple[str | None, str, str | None, str]] = {}
+
+    def add(number: str | None, name: str, country: str | None, relation: str) -> None:
+        key = legal_key(name)
+        overseas = is_overseas_number(number) or (not number and country and not is_uk(country))
+        if key and key != own and overseas and key not in out:
+            out[key] = (number if is_overseas_number(number) else None, name, country, relation)
+
+    for parent in profile.ownership.parents:
+        add(parent.company_number, parent.name, parent.country_registered, "parent")
+    lei = profile.lei
+    for parent in (lei.direct_parent, lei.ultimate_parent):
+        if parent is not None:
+            add(parent.company_number, parent.name, parent.country, "parent")
+    for child in lei.subsidiaries:
+        add(child.company_number, child.name, child.country, "subsidiary")
+    return list(out.values())[:MAX_OVERSEAS_GROUP]

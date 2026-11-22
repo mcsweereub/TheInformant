@@ -48,14 +48,23 @@ from .fetchutil import api_client
 from .website.extract import legal_key
 
 API = "https://use-land-property-data.service.gov.uk/api/v1"
-DATASET = "ccod"
+UK = "ccod"  # UK companies that own property in England and Wales
+OVERSEAS = "ocod"  # overseas companies that own property in England and Wales
+DATASETS = (UK, OVERSEAS)
+TITLES = {UK: "UK companies that own property in England and Wales",
+          OVERSEAS: "Overseas companies that own property in England and Wales"}
+DATASET = UK
 DATASET_PAGE = "https://use-land-property-data.service.gov.uk/datasets/ccod"
 DB_NAME = "land_registry_ccod.sqlite"
 MAX_ITEMS = 250  # titles listed per company (totals always cover all of them)
 CHECK_EVERY = timedelta(days=1)  # how often a lookup asks the API for a newer month
 BATCH = 50_000
 OWNERS = 4  # the CSV has up to four proprietors per title
-_FILE_RE = re.compile(r"^CCOD_(FULL|COU)_(\d{4})_(\d{2})\.zip$", re.I)
+_FILE_RE = re.compile(r"^(CCOD|OCOD)_(FULL|COU)_(\d{4})_(\d{2})\.zip$", re.I)
+# Companies House numbers given to overseas companies (FC/SF/NF: UK establishments,
+# OE: the register of overseas entities). Other numbers in the overseas dataset come from
+# foreign registers and are never treated as Companies House numbers.
+_UK_OVERSEAS_NUMBER = re.compile(r"^(FC|SF|NF|OE)\d{4,6}$", re.I)
 
 Notify = Callable[[str], None]
 
@@ -65,8 +74,17 @@ def data_dir() -> Path:
     return Path(os.environ.get("INFORMANT_DATA_DIR") or ".informant_data")
 
 
-def db_path() -> Path:
-    return data_dir() / DB_NAME
+def dataset_page(dataset: str = UK) -> str:
+    return f"https://use-land-property-data.service.gov.uk/datasets/{dataset}"
+
+
+def db_path(dataset: str = UK) -> Path:
+    return data_dir() / f"land_registry_{dataset}.sqlite"
+
+
+def is_overseas_number(number: str | None) -> bool:
+    """A Companies House number for an overseas company (FC012345, OE001234, ...)."""
+    return bool(_UK_OVERSEAS_NUMBER.match((number or "").strip().replace(" ", "")))
 
 
 def api_key() -> str | None:
@@ -76,7 +94,69 @@ def api_key() -> str | None:
 def file_month(file_name: str) -> str | None:
     """'CCOD_COU_2026_11.zip' -> '2026-11'."""
     m = _FILE_RE.match(file_name or "")
-    return f"{m.group(2)}-{m.group(3)}" if m else None
+    return f"{m.group(3)}-{m.group(4)}" if m else None
+
+
+def _file_kind(file_name: str, dataset: str) -> str | None:
+    """'FULL' / 'COU' for one of the dataset's files, else None."""
+    m = _FILE_RE.match(file_name or "")
+    return m.group(2).upper() if m and m.group(1).lower() == dataset else None
+
+
+# --- countries (the overseas dataset names them; PSC and LEI records vary) ---------------
+
+_COUNTRY_ALIASES = {
+    "JE": "JERSEY", "GG": "GUERNSEY", "IM": "ISLE OF MAN", "VG": "BRITISH VIRGIN ISLANDS",
+    "BVI": "BRITISH VIRGIN ISLANDS", "VIRGIN ISLANDS BRITISH": "BRITISH VIRGIN ISLANDS",
+    "VIRGIN ISLANDS": "BRITISH VIRGIN ISLANDS",
+    "KY": "CAYMAN ISLANDS", "CAYMAN": "CAYMAN ISLANDS", "LU": "LUXEMBOURG",
+    "NL": "NETHERLANDS", "THE NETHERLANDS": "NETHERLANDS", "HOLLAND": "NETHERLANDS",
+    "IE": "IRELAND", "REPUBLIC OF IRELAND": "IRELAND", "SG": "SINGAPORE", "HK": "HONG KONG",
+    "GI": "GIBRALTAR", "AE": "UNITED ARAB EMIRATES", "UAE": "UNITED ARAB EMIRATES",
+    "DUBAI": "UNITED ARAB EMIRATES", "ABU DHABI": "UNITED ARAB EMIRATES", "BM": "BERMUDA",
+    "CH": "SWITZERLAND", "DE": "GERMANY", "FR": "FRANCE", "CY": "CYPRUS", "MT": "MALTA",
+    "LI": "LIECHTENSTEIN", "BS": "BAHAMAS", "PA": "PANAMA", "CA": "CANADA", "AU": "AUSTRALIA",
+    "QA": "QATAR", "SA": "SAUDI ARABIA", "KW": "KUWAIT", "IN": "INDIA", "CN": "CHINA",
+    "JP": "JAPAN", "SE": "SWEDEN", "NO": "NORWAY", "DK": "DENMARK", "BE": "BELGIUM",
+    "ES": "SPAIN", "IT": "ITALY",
+    "US": "USA", "USA": "USA", "UNITED STATES": "USA", "UNITED STATES OF AMERICA": "USA",
+    "DELAWARE": "USA", "NEW YORK": "USA", "CALIFORNIA": "USA", "NEVADA": "USA",
+    "GB": "UNITED KINGDOM", "UK": "UNITED KINGDOM", "ENGLAND": "UNITED KINGDOM",
+    "WALES": "UNITED KINGDOM", "SCOTLAND": "UNITED KINGDOM", "NORTHERN IRELAND": "UNITED KINGDOM",
+    "ENGLAND AND WALES": "UNITED KINGDOM", "ENGLAND WALES": "UNITED KINGDOM",
+    "GREAT BRITAIN": "UNITED KINGDOM", "UNITED KINGDOM": "UNITED KINGDOM",
+}
+
+
+def _words(text: str) -> str:
+    return " ".join(re.sub(r"[^A-Z& ]+", " ", text.upper().replace(".", "")).replace("&", "AND").split())
+
+
+def country_key(text: str | None) -> str | None:
+    """One spelling per country: 'U.S.A.', 'United States' and 'Delaware, USA' -> 'USA';
+    'JE' (an LEI code) and 'Jersey' -> 'JERSEY'. Unknown names are just upper-cased."""
+    whole = _words(text or "")
+    if not whole:
+        return None
+    if whole in _COUNTRY_ALIASES:
+        return _COUNTRY_ALIASES[whole]
+    for part in reversed(re.split(r"[,(/]", text or "")):  # "Delaware, United States"
+        key = _words(part)
+        if key in _COUNTRY_ALIASES:
+            return _COUNTRY_ALIASES[key]
+    return whole
+
+
+def is_uk(country: str | None) -> bool:
+    return country_key(country) == "UNITED KINGDOM"
+
+
+def same_country(a: str | None, b: str | None) -> bool | None:
+    """True / False, or None when either is unknown."""
+    ka, kb = country_key(a), country_key(b)
+    if not ka or not kb:
+        return None
+    return ka == kb or ka in kb or kb in ka
 
 
 def number_key(number: str | None) -> str:
@@ -126,36 +206,38 @@ class LandRegistryApi:
             raise UpstreamError(f"HM Land Registry API: HTTP {resp.status_code} for {path}")
         return resp.json()
 
-    def latest(self) -> dict:
+    def latest(self, dataset: str = UK) -> dict:
         """{"full": file name, "change": file name, "month": "YYYY-MM", "published": date}."""
-        result = self._get(f"/datasets/{DATASET}").get("result") or {}
+        result = self._get(f"/datasets/{dataset}").get("result") or {}
         out: dict = {"published": _date(result.get("last_updated"))}
         for res in result.get("resources") or []:
             name = res.get("file_name") or ""
-            m = _FILE_RE.match(name)
-            if m:
-                out["full" if m.group(1).upper() == "FULL" else "change"] = name
+            kind = _file_kind(name, dataset)
+            if kind:
+                out["full" if kind == "FULL" else "change"] = name
                 out["month"] = file_month(name)
         if "full" not in out:
             raise UpstreamError("HM Land Registry API: no full file listed for the dataset")
         return out
 
-    def history(self) -> list[dict]:
+    def history(self, dataset: str = UK) -> list[dict]:
         """Every published file: [{"file", "kind" (FULL/COU), "month", "published"}], oldest first."""
-        data = self._get(f"/datasets/history/{DATASET}")
+        data = self._get(f"/datasets/history/{dataset}")
         files = []
         for item in data.get("dataset_history") or []:
             name = item.get("filename") or ""
-            m = _FILE_RE.match(name)
-            if m:
-                files.append({"file": name, "kind": m.group(1).upper(), "month": file_month(name),
+            kind = _file_kind(name, dataset)
+            if kind:
+                files.append({"file": name, "kind": kind, "month": file_month(name),
                               "published": _date(item.get("unsorted_date"))})
         return sorted(files, key=lambda f: (f["month"], f["kind"]))
 
     def download(self, file_name: str, dest: Path, notify: Notify | None = None) -> Path:
         """Fetch a file: the API gives a signed link valid for ~10 seconds, so the download
         starts straight away."""
-        link = (self._get(f"/datasets/{DATASET}/{file_name}").get("result") or {}).get("download_url")
+        m = _FILE_RE.match(file_name or "")
+        dataset = m.group(1).lower() if m else UK
+        link = (self._get(f"/datasets/{dataset}/{file_name}").get("result") or {}).get("download_url")
         if not link:
             raise UpstreamError(f"HM Land Registry API: no download link for {file_name}")
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -204,9 +286,24 @@ def read_rows(zip_path: Path) -> Iterator[Row]:
                     yield row
 
 
+def owner_keys(name: str, number: str, country: str = "") -> list[str]:
+    """Lookup keys for one proprietor. UK companies: their number, or the exact name when
+    the entry has none. Overseas companies: the exact name always (they are found by name
+    from PSC and LEI records), plus a Companies House FC/OE number when there is one;
+    numbers from foreign registers are not indexed."""
+    if not country:
+        key = f"n:{number_key(number)}" if number_key(number) else f"k:{legal_key(name)}"
+        return [key] if len(key) > 2 else []
+    keys = [f"k:{legal_key(name)}"] if legal_key(name) else []
+    if is_overseas_number(number):
+        keys.insert(0, f"n:{number_key(number)}")
+    return keys
+
+
 def parse_record(rec: dict) -> Row | None:
     title = (rec.get("Title Number") or "").strip()
-    if not title or rec.get("Tenure") is None:  # footer lines ("Row Count: ...")
+    # the footer line is "Row Count:,<n>" (two cells, so Tenure holds the count)
+    if not title or rec.get("Tenure") is None or title.lower().startswith("row count"):
         return None
     owners, keys = [], []
     for i in range(1, OWNERS + 1):
@@ -216,10 +313,12 @@ def parse_record(rec: dict) -> Row | None:
         number = (rec.get(f"Company Registration No. ({i})") or "").strip()
         address = ", ".join(a.strip() for a in (rec.get(f"Proprietor ({i}) Address ({j})")
                                                 for j in (1, 2, 3)) if a and a.strip())
-        owners.append([name, number, (rec.get(f"Proprietorship Category ({i})") or "").strip(), address])
-        key = f"n:{number_key(number)}" if number_key(number) else f"k:{legal_key(name)}"
-        if key not in keys and len(key) > 2:
-            keys.append(key)
+        country = (rec.get(f"Country Incorporated ({i})") or "").strip()  # overseas dataset only
+        owners.append([name, number, (rec.get(f"Proprietorship Category ({i})") or "").strip(),
+                       address, country])
+        for key in owner_keys(name, number, country):
+            if key not in keys:
+                keys.append(key)
     added = _date(rec.get("Date Proprietor Added"))
     values = (title, (rec.get("Tenure") or "").strip(), (rec.get("Property Address") or "").strip(),
               (rec.get("District") or "").strip(), (rec.get("County") or "").strip(),
@@ -249,8 +348,9 @@ CREATE INDEX IF NOT EXISTS owners_title ON owners (title_number);
 class PropertyStore:
     """The local copy of the dataset."""
 
-    def __init__(self, path: Path | None = None):
-        self.path = path or db_path()
+    def __init__(self, path: Path | None = None, dataset: str = UK):
+        self.dataset = dataset
+        self.path = path or db_path(dataset)
 
     def exists(self) -> bool:
         return self.path.is_file()
@@ -292,7 +392,7 @@ class PropertyStore:
               notify: Notify | None = None) -> int:
         """A fresh database from a full file, swapped in only when complete."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(prefix=".ccod.", suffix=".sqlite", dir=self.path.parent)
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{self.dataset}.", suffix=".sqlite", dir=self.path.parent)
         os.close(fd)
         tmp = Path(tmp_name)
         count = 0
@@ -385,17 +485,18 @@ def update(store: PropertyStore | None = None, api: LandRegistryApi | None = Non
     """Bring the local copy up to the latest month. Returns what was done:
     {"action": "none" | "changes" | "full" | "needs_full", "month", "files", ...}."""
     store = store or PropertyStore()
+    ds = store.dataset
     own_api = api is None
     api = api or LandRegistryApi()
     try:
-        latest = api.latest()
+        latest = api.latest(ds)
         current = store.meta().get("month") if store.exists() else None
         if not full and current and current >= latest["month"]:
             store.mark_checked()
             return {"action": "none", "month": current, "files": []}
         plan: list[dict] = []
         if not full and current:
-            history = api.history()
+            history = api.history(ds)
             months = sorted({f["month"] for f in history if f["month"] > current})
             changes = {f["month"]: f for f in history if f["kind"] == "COU"}
             if latest.get("change") and latest["month"] not in changes:
@@ -463,21 +564,30 @@ def keep_current(store: PropertyStore, notify: Notify | None = None) -> str | No
 # --- one company ----------------------------------------------------------------------------
 
 
-def _title(row: sqlite3.Row, own_keys: set[str], matched_by: str) -> PropertyTitle:
-    owners = json.loads(row["owners"] or "[]")
+def _owners(row: sqlite3.Row) -> list[tuple[str, str, str, str, str]]:
+    """(name, number, category, address, country) for each proprietor on the title."""
+    out = []
+    for entry in json.loads(row["owners"] or "[]"):
+        name, number, category, address, *rest = entry  # older copies have no country
+        out.append((name, number, category, address, rest[0] if rest else ""))
+    return out
+
+
+def _title(row: sqlite3.Row, own_keys: set[str], matched_by: str, dataset: str = UK) -> PropertyTitle:
     mine, others = None, []
-    for name, number, category, address in owners:
-        key = f"n:{number_key(number)}" if number_key(number) else f"k:{legal_key(name)}"
-        if mine is None and key in own_keys:
+    for name, number, category, address, country in _owners(row):
+        if mine is None and own_keys & set(owner_keys(name, number, country)):
             mine = address
         else:
-            others.append(CoOwner(name=name, company_number=number or None, category=category or None))
+            uk_number = number if (not country or is_overseas_number(number)) else ""
+            others.append(CoOwner(name=name, company_number=uk_number or None,
+                                  category=category or None, country=country or None))
     return PropertyTitle(
         title_number=row["title_number"], tenure=row["tenure"] or None, address=row["address"] or None,
         district=row["district"] or None, county=row["county"] or None, region=row["region"] or None,
         postcode=row["postcode"] or None, multiple_addresses=bool(row["multiple"]),
         price_paid=row["price"], owner_since=date.fromisoformat(row["added"]) if row["added"] else None,
-        owner_address=mine or None, co_owners=others, matched_by=matched_by)
+        owner_address=mine or None, co_owners=others, matched_by=matched_by, dataset=dataset)
 
 
 def name_variants(name: str) -> list[str]:
@@ -514,15 +624,19 @@ def fetch_property(company_number: str | None, names: Iterable[str] = (),
         holdings.notes.append("no local copy of the Land Registry dataset: run "
                               "`informant property --update` (downloads ~1.6 GB of data once)")
         return holdings
+    ds = store.dataset
     meta = store.meta()
-    holdings.dataset = meta.get("dataset") or None
-    holdings.data_as_of = _date_iso(meta.get("published"))
-    holdings.sources = [Source(name="land_registry", url=DATASET_PAGE,
-                               retrieved_at=_datetime_iso(meta.get("updated_at")) or utcnow())]
+    if ds == OVERSEAS:
+        holdings.overseas_dataset = meta.get("dataset") or None
+        holdings.overseas_data_as_of = _date_iso(meta.get("published"))
+    else:
+        holdings.dataset = meta.get("dataset") or None
+        holdings.data_as_of = _date_iso(meta.get("published"))
+    holdings.sources = [source_for(store, meta)]
     by_number, by_name = _keys(company_number, names)
     own = set(by_number + by_name)
     rows = store.titles_for(by_number + by_name)
-    titles = [_title(row, own, "company_number" if key.startswith("n:") else "name")
+    titles = [_title(row, own, "company_number" if key.startswith("n:") else "name", ds)
               for key, row in rows]
     _summarise(holdings, titles)
     holdings.items = sorted(titles, key=lambda t: (t.owner_since or date.min, t.title_number),
@@ -570,11 +684,55 @@ def fetch_group_property(companies: list[tuple[str, str, str]],
     return out
 
 
+def fetch_overseas_group_property(companies: list[tuple[str | None, str, str | None, str]],
+                                  store: PropertyStore) -> tuple[list[GroupProperty], list[str]]:
+    """Totals for overseas group companies (number, name, country, relation) from the
+    overseas companies dataset: by FC/OE number when known, else by exact name (allowing
+    for how initials are written). A title whose owner of that name was incorporated in a
+    different country is not counted. Returns (groups, notes)."""
+    out, notes = [], []
+    for number, name, country, relation in companies:
+        by_number = [f"n:{number_key(number)}"] if is_overseas_number(number) else []
+        by_name = [f"k:{k}" for k in name_variants(name)]
+        own = set(by_number + by_name)
+        titles, other_country = [], set()
+        for key, row in store.titles_for(by_number + by_name):
+            if key.startswith("k:"):
+                theirs = next((c for n, num, _, _, c in _owners(row)
+                               if own & set(owner_keys(n, num, c))), "")
+                if same_country(country, theirs) is False:
+                    other_country.add(theirs)
+                    continue
+                country = country or theirs or None
+            titles.append(_title(row, own, "company_number" if key.startswith("n:") else "name",
+                                 OVERSEAS))
+        if other_country:
+            notes.append(f"a company named {name} incorporated in {', '.join(sorted(other_country))} "
+                         f"(not {country}) owns titles: not counted")
+        if titles:
+            matched = "company_number" if all(t.matched_by == "company_number" for t in titles) else "name"
+            g = GroupProperty(name=name, company_number=number if is_overseas_number(number) else None,
+                              relation=relation, dataset=OVERSEAS, matched_by=matched,
+                              country=country)
+            _summarise(g, titles)
+            out.append(g)
+    return out, notes
+
+
+def source_for(store: PropertyStore, meta: dict | None = None) -> Source:
+    meta = store.meta() if meta is None else meta
+    return Source(name="land_registry", url=dataset_page(store.dataset),
+                  retrieved_at=_datetime_iso(meta.get("updated_at")) or utcnow())
+
+
 def _date_iso(text: str | None) -> date | None:
     try:
         return date.fromisoformat(text) if text else None
     except ValueError:
         return None
+
+
+date_or_none = _date_iso
 
 
 def _datetime_iso(text: str | None) -> datetime | None:
@@ -588,12 +746,18 @@ def property_material(holdings: PropertyHoldings, limit: int = 15):
     """LLM material: where the company owns land or buildings, from the register."""
     from .website.parse import Page
 
-    if not holdings.found:
+    overseas = [g for g in holdings.group if g.dataset == OVERSEAS]
+    if not holdings.found and not overseas:
         return None
-    lines = [f"The company owns {holdings.found} registered title(s) in England and Wales "
-             f"({holdings.freehold} freehold, {holdings.leasehold} leasehold)."]
+    lines = []
+    if holdings.found:
+        lines.append(f"The company owns {holdings.found} registered title(s) in England and Wales "
+                     f"({holdings.freehold} freehold, {holdings.leasehold} leasehold).")
     for t in holdings.items[:limit]:
         lines.append(f"{t.tenure or 'Title'}: {t.address or t.title_number}"
                      + (f" (owner since {t.owner_since:%Y})" if t.owner_since else ""))
+    for g in overseas:
+        lines.append(f"Its {g.relation} {g.name}" + (f" ({g.country.title()})" if g.country else "")
+                     + f" owns {g.titles} title(s) in England and Wales.")
     return Page(url=DATASET_PAGE, kind="property", status_code=200,
                 title="Property owned by the company (HM Land Registry)", text="\n".join(lines))

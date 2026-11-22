@@ -18,7 +18,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, PrivateAttr
 
-SCHEMA_VERSION = "0.15.0"
+SCHEMA_VERSION = "0.16.0"
 
 SourceName = Literal[
     "companies_house",
@@ -671,8 +671,9 @@ class Domain(Sourced):
 
 class CoOwner(BaseModel):
     name: str
-    company_number: str | None = None
+    company_number: str | None = None  # Companies House number only (never a foreign one)
     category: str | None = None  # e.g. "Limited Company or Public Limited Company"
+    country: str | None = None  # country of incorporation, for overseas companies
 
 
 class PropertyTitle(BaseModel):
@@ -692,12 +693,21 @@ class PropertyTitle(BaseModel):
     owner_address: str | None = None  # the company's address on the title (for notices)
     co_owners: list[CoOwner] = Field(default_factory=list)  # other organisations on the title
     matched_by: Literal["company_number", "name"] = "company_number"
+    # "ccod" = UK companies dataset, "ocod" = overseas companies dataset
+    dataset: Literal["ccod", "ocod"] = "ccod"
 
 
 class GroupProperty(BaseModel):
+    """Titles owned by another company in the group. UK companies are matched on their
+    Companies House number; overseas ones (from the overseas companies dataset) on their
+    exact name, with the country of incorporation checked when both records give one."""
+
     name: str
-    company_number: str
+    company_number: str | None = None  # None for an overseas company not registered here
     relation: Literal["parent", "subsidiary"]
+    dataset: Literal["ccod", "ocod"] = "ccod"
+    country: str | None = None  # country of incorporation (overseas companies)
+    matched_by: Literal["company_number", "name"] = "company_number"
     titles: int = 0
     freehold: int = 0
     leasehold: int = 0
@@ -713,6 +723,10 @@ class PropertyHoldings(Sourced):
 
     dataset: str | None = None  # file the local copy was built from, e.g. CCOD_FULL_2026_11.zip
     data_as_of: date | None = None  # when HM Land Registry published that data
+    # the overseas companies dataset, when it was searched (overseas group companies, or
+    # the company itself when it is an overseas company registered here: FC/OE numbers)
+    overseas_dataset: str | None = None
+    overseas_data_as_of: date | None = None
     found: int = 0
     freehold: int = 0
     leasehold: int = 0

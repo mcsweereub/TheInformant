@@ -251,6 +251,23 @@ uv run informant property                  # what the local copy holds
 uv run informant property 00502851         # one company's titles, from the local copy
 ```
 
+**Overseas companies.** HM Land Registry also publishes "Overseas companies that own
+property in England and Wales" (formerly OCOD: about 91,000 titles, 37 MB). Accept that
+dataset's licence too (same account and key); `--update` then keeps both copies, or pick
+one with `--dataset ccod|ocod`. UK companies are never in it, so a lookup uses it for:
+
+- the company's **overseas group companies**: corporate owners in the PSC chain registered
+  abroad, and LEI parents and subsidiaries outside the UK. These have no Companies House
+  number, so they match on their exact name, and a title is not counted when the owner of
+  that name was incorporated in a different country (noted). They appear in `group` with
+  `dataset: "ocod"` and `country`.
+- an **overseas company registered here** (Companies House numbers starting FC, SF, NF or
+  OE): its own titles come from the overseas dataset (`items[].dataset: "ocod"`).
+
+Registration numbers from foreign registers in that dataset are kept out of
+`company_number`. `informant property FC029833` or `informant property "EXACT NAME"`
+searches the overseas copy.
+
 During a lookup, the local copy is checked for a newer month at most once a day, and
 change files are applied automatically (seconds). A lookup never downloads the full file:
 if change files can't bridge the gap, it says to run `--update --full`. Without a local

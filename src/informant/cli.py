@@ -489,7 +489,9 @@ def _print_property(p, limit: int = 6) -> None:
     elif p.group:
         out.print("Property: none registered to the company itself")
     for g in p.group:
-        out.print(f"  owned by its {g.relation} {g.name} ({g.company_number}): {g.titles} title(s)"
+        where = ", ".join(x for x in (g.company_number, (g.country or "").title()) if x)
+        out.print(f"  owned by its {g.relation} {g.name}" + (f" ({where})" if where else "")
+                  + f": {g.titles} title(s)"
                   + (f", {_money(g.total_price_paid)} recorded" if g.total_price_paid else ""),
                   highlight=False)
     for note in p.notes:
@@ -896,62 +898,86 @@ def cache_cmd(
 
 @app.command("property")
 def property_cmd(
-    company: str | None = typer.Argument(None, help="Company number to show (local data only)."),
+    company: str | None = typer.Argument(
+        None, help="Company number to show, or an overseas company's exact name (local data only)."),
     do_update: bool = typer.Option(False, "--update",
-                                   help="Download the dataset (first time) or apply new monthly changes."),
+                                   help="Download the datasets (first time) or apply new monthly changes."),
     full: bool = typer.Option(False, "--full", help="With --update: rebuild from the latest full file."),
+    dataset: str = typer.Option("all", "--dataset",
+                                help="ccod (UK companies), ocod (overseas companies) or all."),
     json_mode: bool = JSON_OPT,
 ) -> None:
-    """HM Land Registry's companies-that-own-property dataset: status, update, or one company."""
+    """HM Land Registry's datasets of UK and overseas companies that own property: status,
+    update, or one company."""
 
     def body() -> None:
-        store = land_registry.PropertyStore()
-        result = None
+        if dataset not in (*land_registry.DATASETS, "all"):
+            raise ConfigError("--dataset must be ccod, ocod or all")
+        chosen = land_registry.DATASETS if dataset == "all" else (dataset,)
+        stores = {ds: land_registry.PropertyStore(dataset=ds) for ds in land_registry.DATASETS}
+        results: dict[str, dict] = {}
         if do_update or full:
             notify = None if json_mode else (lambda m: err.print(f"[dim]{m}[/dim]"))
-            result = land_registry.update(store, full=full, notify=notify)
+            for ds in chosen:
+                results[ds] = land_registry.update(stores[ds], full=full, notify=notify)
         if company:
             number = normalise_company_number(company)
+            ds = (land_registry.OVERSEAS if number is None or land_registry.is_overseas_number(number)
+                  else land_registry.UK)
+            store = stores[ds]
             if not store.exists():
-                raise NotFoundError("no local Land Registry data: run `informant property --update`")
-            holdings = land_registry.fetch_property(number, store=store)
+                raise NotFoundError(f"no local copy of the {land_registry.TITLES[ds]} dataset: run "
+                                    f"`informant property --update --dataset {ds}`")
+            holdings = land_registry.fetch_property(number, [] if number else [company], store=store)
             if json_mode:
                 print_json({"ok": True, "command": "property", "company_number": number,
-                            "update": result, "property": holdings.model_dump(mode="json")})
+                            "dataset": ds, "update": results.get(land_registry.UK),
+                            "updates": results, "property": holdings.model_dump(mode="json")})
                 return
             if not holdings.found:
-                out.print(f"No titles registered to company number {number}.")
+                out.print(f"No titles registered to {number or company}.")
             _print_property(holdings, limit=40)
             return
-        meta = store.meta()
-        status = {"path": str(store.path), "exists": store.exists(),
-                  "dataset": meta.get("dataset") or None, "month": meta.get("month") or None,
-                  "published": meta.get("published") or None,
-                  "titles": int(meta["titles"]) if meta.get("titles") else None,
-                  "changes_applied": [c for c in (meta.get("changes") or "").split(",") if c],
-                  "updated_at": meta.get("updated_at") or None,
-                  "bytes": store.path.stat().st_size if store.exists() else 0,
-                  "api_key_set": land_registry.api_key() is not None}
+        statuses = {ds: _property_status(stores[ds]) for ds in land_registry.DATASETS}
         if json_mode:
-            print_json({"ok": True, "command": "property", "update": result, **status})
+            # top level: the UK dataset, as before the overseas one was added
+            print_json({"ok": True, "command": "property", "update": results.get(land_registry.UK),
+                        "updates": results, **statuses[land_registry.UK], "datasets": statuses,
+                        "api_key_set": land_registry.api_key() is not None})
             return
-        if result:
-            what = {"none": "already up to date", "changes": "applied " + ", ".join(result["files"]),
-                    "full": "built from " + ", ".join(result["files"])}[result["action"]]
-            out.print(f"[green]Land Registry data {what}.[/green]")
-        if not status["exists"]:
-            out.print("No local Land Registry data. Run `informant property --update` "
-                      "(downloads the full monthly file once, then small monthly changes).")
-            if not status["api_key_set"]:
-                out.print("[yellow]LAND_REGISTRY_API_KEY is not set.[/yellow]")
-            return
-        out.print(f"Land Registry data: {status['titles']:,} titles, month {status['month']} "
-                  f"(published {status['published']}), {status['bytes'] / 1_073_741_824:.2f} GB")
-        out.print(f"  {status['path']}  [dim]built from {meta.get('base')}"
-                  + (f", then {len(status['changes_applied'])} change file(s)" if status["changes_applied"] else "")
-                  + "[/dim]")
+        for ds in land_registry.DATASETS:
+            status, result = statuses[ds], results.get(ds)
+            label = land_registry.TITLES[ds]
+            if result:
+                what = {"none": "already up to date", "changes": "applied " + ", ".join(result["files"]),
+                        "full": "built from " + ", ".join(result["files"])}[result["action"]]
+                out.print(f"[green]{label}: {what}.[/green]")
+            if not status["exists"]:
+                out.print(f"{label}: no local copy. Run `informant property --update` "
+                          "(downloads the full monthly file once, then small monthly changes).")
+                continue
+            size = status["bytes"] / 1_048_576
+            out.print(f"{label}: {status['titles']:,} titles, month {status['month']} "
+                      f"(published {status['published']}), "
+                      + (f"{size / 1024:.2f} GB" if size >= 1024 else f"{size:.0f} MB"))
+            out.print(f"  {status['path']}  [dim]built from {status['base']}"
+                      + (f", then {len(status['changes_applied'])} change file(s)"
+                         if status["changes_applied"] else "") + "[/dim]")
+        if land_registry.api_key() is None:
+            out.print("[yellow]LAND_REGISTRY_API_KEY is not set.[/yellow]")
 
     _run("property", json_mode, body)
+
+
+def _property_status(store) -> dict:
+    meta = store.meta()
+    return {"path": str(store.path), "exists": store.exists(),
+            "dataset": meta.get("dataset") or None, "month": meta.get("month") or None,
+            "published": meta.get("published") or None, "base": meta.get("base") or None,
+            "titles": int(meta["titles"]) if meta.get("titles") else None,
+            "changes_applied": [c for c in (meta.get("changes") or "").split(",") if c],
+            "updated_at": meta.get("updated_at") or None,
+            "bytes": store.path.stat().st_size if store.exists() else 0}
 
 
 # --- schema / version ---------------------------------------------------------

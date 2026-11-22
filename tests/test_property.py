@@ -45,14 +45,14 @@ def rec(title, owners, tenure="Freehold", address="1 High Street, Leeds LS1 1AA"
     return row
 
 
-def make_zip(path, rows, change_file=False):
-    header = HEADER + (["Change Indicator", "Change Date"] if change_file else [])
+def make_zip(path, rows, change_file=False, header=None):
+    header = (header or HEADER) + (["Change Indicator", "Change Date"] if change_file else [])
     buf = io.StringIO()
     w = csv.DictWriter(buf, fieldnames=header, extrasaction="ignore")
     w.writeheader()
     for r in rows:
         w.writerow(r)
-    buf.write("Row Count: %d\n" % len(rows))  # the real files end with a footer line
+    buf.write("Row Count:,%d\n" % len(rows))  # the real files end with this footer line
     with zipfile.ZipFile(path, "w") as z:
         z.writestr(path.stem + ".csv", "﻿" + buf.getvalue())
     return path
@@ -281,3 +281,144 @@ def test_cli_status_and_company(tmp_path, monkeypatch):
     assert data["company_number"] == "01234567" and data["property"]["found"] == 2
     text = runner.invoke(app, ["property", "1234567"]).stdout
     assert "2 title(s)" in text and "Unit 4, Leeds" in text
+
+
+# --- the overseas companies dataset (OCOD) ----------------------------------------------------
+
+OCOD_HEADER = HEADER[:9]
+for _i in range(1, 5):
+    OCOD_HEADER += [f"Proprietor Name ({_i})", f"Company Registration No. ({_i})",
+                    f"Proprietorship Category ({_i})", f"Country Incorporated ({_i})"] + [
+                    f"Proprietor ({_i}) Address ({j})" for j in (1, 2, 3)]
+OCOD_HEADER += ["Date Proprietor Added", "Additional Proprietor Indicator"]
+
+
+def orec(title, owners, **kw):
+    """owners: (name, number, country)"""
+    row = rec(title, [(n, num) for n, num, _ in owners], **kw)
+    for i, (_, _, country) in enumerate(owners, start=1):
+        row[f"Country Incorporated ({i})"] = country
+    return row
+
+
+OCOD_ROWS = [
+    orec("NGL10", [("MAPLE BANK", "", "CANADA")], region="GREATER LONDON", price="5000000"),
+    orec("NGL11", [("MAPLE BANK", "C123", "CANADA")], tenure="Leasehold"),
+    orec("JY1", [("MAPLE BANK", "", "JERSEY")]),  # same name, different company
+    orec("CP1", [("CAYMAN PUBS LIMITED", "FC029833", "CAYMAN ISLANDS")], added="01-01-2024"),
+    orec("CP2", [("CAYMAN PUBS LIMITED", "", "CAYMAN ISLANDS")], added="01-01-2023"),
+    orec("IE1", [("IRISH HOMES LIMITED", "425195", "IRELAND"),
+                 ("ACME LIMITED", "1234567", "")]),
+]
+
+
+def build_ocod(tmp_path) -> PropertyStore:
+    store = PropertyStore(tmp_path / "ocod.sqlite", dataset=lr.OVERSEAS)
+    zip_path = make_zip(tmp_path / "OCOD_FULL_2026_11.zip", OCOD_ROWS, header=OCOD_HEADER)
+    store.build(read_rows(zip_path), dataset=zip_path.name, month="2026-11", published=date(2026, 11, 3))
+    return store
+
+
+def test_countries_are_compared_whatever_the_spelling():
+    assert lr.country_key("U.S.A.") == lr.country_key("United States") == lr.country_key("US") == "USA"
+    assert lr.country_key("Delaware, United States") == "USA"
+    assert lr.country_key("JE") == lr.country_key("Jersey") == "JERSEY"
+    assert lr.is_uk("England & Wales") and lr.is_uk("Uk") and lr.is_uk("GB") and not lr.is_uk("Guernsey")
+    assert lr.same_country("Cayman Islands", "KY") is True
+    assert lr.same_country("Canada", "JERSEY") is False and lr.same_country(None, "Canada") is None
+    assert lr.is_overseas_number("FC029833") and lr.is_overseas_number("OE001234")
+    assert not lr.is_overseas_number("01234567") and not lr.is_overseas_number("425195")
+
+
+def test_overseas_parent_matched_by_name_and_country(tmp_path):
+    from informant.schema import Ownership, ParentCompany
+
+    ccod, ocod = build_store(tmp_path), build_ocod(tmp_path)
+    assert ocod.meta()["titles"] == "6"
+    p = profile(ownership=Ownership(parents=[
+        ParentCompany(level=1, name="ACME UK HOLDINGS LIMITED", company_number="07654321",
+                      country_registered="England And Wales"),
+        ParentCompany(level=2, name="Maple Bank", country_registered="Canada", is_ultimate=True)]),
+        lei=LegalEntity(lei="X", subsidiaries=[
+            LeiEntity(lei="S1", name="CAYMAN PUBS LIMITED", country="KY"),
+            LeiEntity(lei="S2", name="ACME SERVICES LIMITED", country="GB")]))
+    page = research_property(p, store=ccod, overseas_store=ocod)
+    h = p.property
+    assert h.found == 3  # its own UK titles are unchanged
+    abroad = {g.name: g for g in h.group if g.dataset == "ocod"}
+    maple = abroad["Maple Bank"]
+    assert (maple.titles, maple.relation, maple.country, maple.matched_by) == (2, "parent", "Canada", "name")
+    assert maple.total_price_paid == 5_000_000 and maple.company_number is None
+    assert any("JERSEY" in n and "not counted" in n for n in h.notes)  # the other Maple Bank
+    assert abroad["CAYMAN PUBS LIMITED"].titles == 2
+    assert "ACME SERVICES LIMITED" not in abroad  # UK companies aren't looked for abroad
+    assert h.overseas_dataset == "OCOD_FULL_2026_11.zip" and h.dataset == "CCOD_FULL_2026_10.zip"
+    assert {s.url for s in h.sources} == {lr.dataset_page("ccod"), lr.dataset_page("ocod")}
+    assert "Maple Bank (Canada) owns 2 title(s)" in page.text
+
+
+def test_overseas_company_registered_here_reads_the_overseas_dataset(tmp_path):
+    ccod, ocod = build_store(tmp_path), build_ocod(tmp_path)
+    p = CompanyProfile(query="FC029833", identity=Identity(
+        name="CAYMAN PUBS LIMITED", company_number="FC029833", status="active"))
+    research_property(p, store=ccod, overseas_store=ocod)
+    h = p.property
+    assert h.found == 2 and {t.dataset for t in h.items} == {"ocod"}
+    assert [t.matched_by for t in h.items] == ["company_number", "name"]
+    assert h.overseas_dataset and h.dataset  # both datasets were consulted
+
+
+def test_foreign_registry_numbers_are_not_companies_house_numbers(tmp_path):
+    ocod = build_ocod(tmp_path)
+    assert fetch_property("00425195", store=ocod).found == 0
+    t = fetch_property(None, ["IRISH HOMES LIMITED"], store=ocod).items[0]
+    assert [(c.name, c.company_number, c.country) for c in t.co_owners] == [("ACME LIMITED", "1234567", None)]
+    t = fetch_property("01234567", store=ocod).items[0]  # the UK co-owner is found by number
+    assert [(c.name, c.company_number, c.country) for c in t.co_owners] == [
+        ("IRISH HOMES LIMITED", None, "IRELAND")]
+
+
+def test_without_the_overseas_copy_only_the_uk_dataset_is_used(tmp_path):
+    from informant.schema import Ownership, ParentCompany
+
+    p = profile(ownership=Ownership(parents=[ParentCompany(level=1, name="Maple Bank",
+                                                           country_registered="Canada")]))
+    research_property(p, store=build_store(tmp_path),
+                      overseas_store=PropertyStore(tmp_path / "none.sqlite", dataset=lr.OVERSEAS))
+    assert p.property.found == 3 and p.property.group == [] and p.property.overseas_dataset is None
+
+
+@respx.mock
+def test_update_the_overseas_dataset(tmp_path, monkeypatch):
+    monkeypatch.setenv("INFORMANT_DATA_DIR", str(tmp_path / "data"))
+    respx.get(f"{API}/datasets/ocod").respond(json={"success": True, "result": {
+        "last_updated": "3 November 2026", "resources": [
+            {"file_name": "OCOD_COU_2026_11.zip"}, {"file_name": "OCOD_FULL_2026_11.zip"}]}})
+    full = make_zip(tmp_path / "dl.zip", OCOD_ROWS, header=OCOD_HEADER)
+    respx.get(f"{API}/datasets/ocod/OCOD_FULL_2026_11.zip").respond(json={"success": True, "result": {
+        "download_url": "https://bucket.example/ocod/full.zip?sig=1"}})
+    respx.get("https://bucket.example/ocod/full.zip").respond(content=full.read_bytes())
+    store = PropertyStore(dataset=lr.OVERSEAS)
+    assert store.path.name == "land_registry_ocod.sqlite"
+    result = lr.update(store, lr.LandRegistryApi(key="k"))
+    assert result["action"] == "full" and result["titles"] == 6
+    assert fetch_property(None, ["Maple Bank"], store=store).found == 3
+
+
+def test_cli_overseas(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from informant.cli import app
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("INFORMANT_DATA_DIR", str(tmp_path))
+    build_ocod(tmp_path).path.rename(lr.db_path(lr.OVERSEAS))
+    runner = CliRunner()
+    status = json.loads(runner.invoke(app, ["property", "--json"]).stdout)
+    assert status["exists"] is False  # top level stays the UK dataset
+    assert status["datasets"]["ocod"]["titles"] == 6
+    data = json.loads(runner.invoke(app, ["property", "FC029833", "--json"]).stdout)
+    assert data["dataset"] == "ocod" and data["property"]["found"] == 1
+    by_name = json.loads(runner.invoke(app, ["property", "Maple Bank", "--json"]).stdout)
+    assert by_name["property"]["found"] == 3
+    assert runner.invoke(app, ["property", "--dataset", "xx", "--json"]).exit_code == 3

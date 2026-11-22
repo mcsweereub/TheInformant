@@ -191,7 +191,7 @@ def compare(old: CompanyProfile, new: CompanyProfile) -> Comparison:
                 added="new donation", report_removed=False)
         d.value("political_donations", "accounts statement",
                 lambda p: p.political_donations.accounts_statement)
-    if d.checked("property", lambda p: p.property.dataset):
+    if d.checked("property", lambda p: p.property.dataset or p.property.overseas_dataset):
         d.value("property", "titles owned", lambda p: p.property.found)
         # titles one by one only when every title is listed in both lookups (big holders
         # have a capped list, so a title dropping off it isn't a sale)
@@ -199,8 +199,8 @@ def compare(old: CompanyProfile, new: CompanyProfile) -> Comparison:
             d.items("property", lambda p: p.property.items, lambda t: t.title_number,
                     lambda t: f"{t.tenure or 'title'} {t.address or t.title_number}"[:120],
                     added="new title", removed="title no longer registered to it")
-        old_g = {g.company_number: g for g in old.property.group}
-        new_g = {g.company_number: g for g in new.property.group}
+        old_g = {g.company_number or g.name: g for g in old.property.group}
+        new_g = {g.company_number or g.name: g for g in new.property.group}
         for number in list(new_g) + [n for n in old_g if n not in new_g]:
             g = new_g.get(number) or old_g[number]
             b = old_g[number].titles if number in old_g else 0
