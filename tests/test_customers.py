@@ -5,6 +5,7 @@ import json
 
 import pytest
 import respx
+from test_checks import extraction
 from typer.testing import CliRunner
 
 from informant import cli
@@ -15,7 +16,6 @@ from informant.schema import CompanyProfile, Customer, Identity
 from informant.sources.companies_house import BASE_URL, CompaniesHouseClient
 from informant.sources.companies_house.customers import match_customer, resolve_customers
 from informant.storage import link_customers, load_index, save_profile
-from test_checks import extraction
 
 
 def cust(name, evidence="case study"):

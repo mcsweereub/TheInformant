@@ -22,6 +22,14 @@ import httpx
 
 from ...cache import PageCache
 from ...schema import utcnow
+from ..httpsafe import (
+    USER_AGENT,
+    BlockedAddress,
+    check_url,
+    decode,
+    read_truncated,
+    safe_client,
+)
 from .pages import (
     FALLBACK_PATHS,
     NOT_FOUND_RE,
@@ -33,8 +41,8 @@ from .pages import (
 from .parse import CrawlResult, Page, looks_js_rendered, normalise_url, parse_page, path_key
 from .renderer import BrowserUnavailable, PlaywrightRenderer, Renderer
 
-USER_AGENT = "Mozilla/5.0 (compatible; informant/0.1; personal company research)"
-MAX_BYTES = 3_000_000
+MAX_BYTES = 3_000_000  # of a page's HTML (the rest is cut off, not read)
+ROBOTS_MAX_BYTES = 500_000
 ROBOTS_MAX_AGE = timedelta(days=1)
 MAX_SITEMAP_FILES = 3
 MAX_SITEMAP_URLS = 3_000
@@ -50,10 +58,26 @@ def decode_body(resp: httpx.Response) -> str:
     dashes, quotes and pound signs into sequences like 'â€“'. Valid UTF-8 is
     almost never anything else, so trust the bytes over the label.
     """
-    try:
-        return resp.content.decode("utf-8")
-    except UnicodeDecodeError:
-        return resp.text
+    return decode(resp, resp.content)
+
+
+# Bot-protection pages (Imperva, Cloudflare, Akamai, DataDome, PerimeterX...). Some are
+# served with status 200, so without this their text would be read as the company's.
+_CHALLENGE_RE = re.compile(
+    r"pardon our interruption|made us think you were a bot|just a moment\.\.\.|"
+    r"attention required! \| cloudflare|checking your browser before accessing|"
+    r"enable javascript and cookies to continue|verify you are (?:a )?human|"
+    r"are you a robot|access to this page has been denied|request unsuccessful\. incapsula|"
+    r"cf-chl-|_incapsula_resource|px-captcha|captcha-delivery\.com|"
+    r"<title>\s*access denied\s*</title>",
+    re.I)
+
+
+def looks_like_challenge(page: Page) -> bool:
+    """A short page whose markup or text is a bot check rather than real content."""
+    if page.text and len(page.text.split()) > 400:
+        return False  # real pages that merely mention a CAPTCHA (a contact form) are long
+    return bool(_CHALLENGE_RE.search((page.html or "")[:50_000]) or _CHALLENGE_RE.search(page.text or ""))
 
 
 BrowserMode = str  # "auto" (only when needed), "always", or "never"
@@ -78,11 +102,8 @@ class Crawler:
         self._renderer = renderer
         self._renderer_broken = False  # set once the browser turns out to be unavailable
         self._js_site = False  # set once a site's homepage needed the browser
-        self._http = client or httpx.Client(
-            timeout=timeout,
-            follow_redirects=True,
-            headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"},
-        )
+        self._http = client or safe_client(
+            timeout=timeout, headers={"Accept": "text/html,application/xhtml+xml"})
         self._robots: dict[str, RobotFileParser | None] = {}
         self._last_request = 0.0
 
@@ -116,8 +137,8 @@ class Crawler:
             status, text = (hit.status_code, hit.html) if hit else (None, "")
             if hit is None:
                 try:
-                    resp = self._http.get(robots_url)
-                    status, text = resp.status_code, resp.text[:MAX_BYTES]
+                    resp, body = read_truncated(self._http, robots_url, ROBOTS_MAX_BYTES)
+                    status, text = resp.status_code, decode(resp, body)
                     if self.cache is not None:
                         self.cache.put(robots_url, final_url=robots_url, status_code=status,
                                        html=text if status < 400 else "", headers={},
@@ -155,10 +176,10 @@ class Crawler:
             return None
         self._wait(self._crawl_delay(url))
         try:
-            resp = self._http.get(url)
+            resp, body = read_truncated(self._http, url, MAX_BYTES)
         except httpx.HTTPError:
             return None
-        text = resp.text[:MAX_BYTES] if resp.status_code == 200 else ""
+        text = decode(resp, body) if resp.status_code == 200 else ""
         if self.cache is not None:
             self.cache.put(url, final_url=str(resp.url), status_code=resp.status_code, html=text,
                            headers={}, rendered=False, fetched_at=utcnow())
@@ -198,6 +219,11 @@ class Crawler:
         """Load a page in the headless browser. None if unavailable or it failed."""
         if self.browser_mode == "never" or self._renderer_broken:
             return None
+        try:
+            check_url(url)
+        except BlockedAddress as e:
+            notes.append(f"{url}: {e}; skipped")
+            return None
         if self._renderer is None:
             self._renderer = PlaywrightRenderer(USER_AGENT)
         self._wait(self._crawl_delay(url))
@@ -215,6 +241,9 @@ class Crawler:
         page = parse_page(final_url, kind, status, html[:MAX_BYTES])
         page.rendered = True
         page.fetched_at = utcnow()
+        if looks_like_challenge(page):
+            notes.append(f"{url} showed a bot-protection page in the browser (blocked); skipped")
+            return Page(url=final_url, kind=kind, status_code=403)
         return page
 
     # --- cache ------------------------------------------------------------
@@ -226,6 +255,8 @@ class Crawler:
         if hit is None:
             return None
         page = parse_page(hit.final_url, kind, hit.status_code, hit.html)
+        if looks_like_challenge(page):
+            return None  # cached before challenge pages were recognised
         page.headers = hit.headers
         page.rendered = hit.rendered
         page.fetched_at = hit.fetched_at
@@ -282,7 +313,10 @@ class Crawler:
     def _fetch_http(self, url: str, kind: str, notes: list[str]) -> Page | None:
         self._wait(self._crawl_delay(url))
         try:
-            resp = self._http.get(url)
+            resp, raw = read_truncated(self._http, url, MAX_BYTES)
+        except BlockedAddress as e:
+            notes.append(f"{url}: {e}; skipped")
+            return None
         except httpx.HTTPError as e:
             notes.append(f"failed to fetch {url}: {type(e).__name__}")
             return None
@@ -292,10 +326,13 @@ class Crawler:
         ctype = resp.headers.get("content-type", "")
         if resp.status_code != 200 or "html" not in ctype:
             return Page(url=str(resp.url), kind=kind, status_code=resp.status_code)
-        body = decode_body(resp)[:MAX_BYTES]
+        body = decode(resp, raw)
         page = parse_page(str(resp.url), kind, resp.status_code, body)
         page.headers = dict(resp.headers)
         page.fetched_at = utcnow()
+        if looks_like_challenge(page):
+            notes.append(f"{url} returned a bot-protection page (blocked); skipped")
+            return Page(url=str(resp.url), kind=kind, status_code=403)
         return page
 
     def crawl(self, start_url: str, max_pages: int = 8) -> CrawlResult:

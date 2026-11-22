@@ -6,6 +6,9 @@ from datetime import timedelta
 import pytest
 import respx
 from pydantic import BaseModel
+from test_companies_house import FILINGS, OFFICERS, PROFILE, PSCS
+from test_renderer import RICH, SHELL, FakeRenderer
+from test_staged import LARGE, FakeOllama
 from typer.testing import CliRunner
 
 from informant import cli
@@ -15,9 +18,6 @@ from informant.llm.backends.base import Completion, with_cache
 from informant.schema import utcnow
 from informant.sources.companies_house import BASE_URL
 from informant.sources.website.fetch import Crawler
-from test_companies_house import FILINGS, OFFICERS, PROFILE, PSCS
-from test_renderer import RICH, SHELL, FakeRenderer
-from test_staged import LARGE, FakeOllama
 
 HOME = ("<html><head><title>Acme</title></head><body><a href='/about'>About</a><p>"
         + "Acme makes widgets in Leeds. " * 40 + "</p></body></html>")

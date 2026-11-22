@@ -26,13 +26,14 @@ import shutil
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 import httpx
 
 from .companies_house.client import CompaniesHouseClient, CompaniesHouseError
 from .companies_house.mapping import filing_document_url
 from .donations import political_statement
+from .httpsafe import get_capped, safe_client
 from .website.extract import core_name, site_host
 
 PDF = "application/pdf"
@@ -286,13 +287,13 @@ def find_annual_report(crawler, *, company_name: str, made_up: date, website: st
         if not crawler.allowed(url):
             continue
         try:
-            resp = http.get(url)
-        except httpx.HTTPError:
+            # stops reading at the cap instead of loading an endless response into memory
+            resp, content = get_capped(http, url, MAX_PDF_BYTES)
+        except httpx.HTTPError:  # includes TooLarge and BlockedAddress
             continue
-        if resp.status_code != 200 or len(resp.content) > MAX_PDF_BYTES or \
-                not resp.content.startswith(b"%PDF"):
+        if resp.status_code != 200 or not content.startswith(b"%PDF"):
             continue
-        texts = pdf_page_texts(resp.content)
+        texts = pdf_page_texts(content)
         if has_text_layer(texts) and verify_report(texts, company_name, made_up):
             return url, texts
     return None
@@ -364,7 +365,7 @@ def ocr_document(data: bytes, *, cache=None, cache_key: str = "", workers: int |
             progress(f"Reading {len(todo)} chosen pages at full detail")
         with ThreadPoolExecutor(max_workers=workers) as pool:
             texts = list(pool.map(lambda p: _ocr(images[p.number - 1], FULL_OCR_WIDTH), todo))
-        sharp.update({str(p.number): t for p, t in zip(todo, texts)})
+        sharp.update({str(p.number): t for p, t in zip(todo, texts, strict=True)})
         if cache is not None:
             cache.put(cache_key + "#sharp", {"pages": sharp})
     for p in chosen:
@@ -393,9 +394,7 @@ def get_accounts_document(client: CompaniesHouseClient, number: str, company_nam
     if crawler is not None and made_up is not None:
         if progress:
             progress("Looking for the company's own annual report")
-        with httpx.Client(timeout=60, follow_redirects=True,
-                          headers={"User-Agent": getattr(crawler, "user_agent", None)
-                                   or "Mozilla/5.0 (compatible; informant/0.1; personal company research)"}) as http:
+        with safe_client(timeout=60) as http:
             found = find_annual_report(crawler, company_name=company_name, made_up=made_up,
                                        website=website, seed_links=seed_links or [], http=http)
             if found is None and search is not None:

@@ -96,8 +96,13 @@ All of this is exact registry data: no LLM, no scraping, about 4 seconds per com
    regulatory notices) are skipped. Page kinds the homepage doesn't link are looked up in
    the site's sitemap (`INFORMANT_SITEMAP=off` disables this). Spare slots go to the
    homepage's other menu links, so a product page like `/eos/` is still read. It obeys
-   robots.txt, waits 1s
-   between requests, stays on the same site, and skips anything that blocks it.
+   robots.txt, waits 1s between requests, stays on the same site, and skips anything
+   that blocks it, including bot-protection pages that come back as a normal page
+   ("Pardon Our Interruption", "Just a moment..."): those are noted, never read as
+   content. It never requests a private or local address (this computer, the home
+   network), whether a link or a redirect points there; `INFORMANT_NETGUARD=off`
+   disables that check. Pages are read up to 3 MB and annual-report PDFs up to 100 MB,
+   and reading stops at the limit.
    If a page comes back nearly empty because JavaScript builds it (e.g. monzo.com),
    it reloads that page in a headless Chromium browser, and loads the rest of that
    site the same way. Control this with `--browser auto|always|never` (default auto).
@@ -482,8 +487,14 @@ path, index = save_profile(result.profile, out_dir=Path("D:/data"))
 Failures raise `informant.errors.InformantError` subclasses, which carry the
 same `code` and `exit_code` as above.
 
-## Tests
+## Tests and checks
 
 ```sh
-uv run pytest
+uv run pytest            # tests: every service is mocked, no API keys or network needed
+uv run ruff check src tests
 ```
+
+GitHub Actions runs both on Linux and Windows for every push, plus a weekly
+`pip-audit` scan of the locked dependencies for known vulnerabilities, and Dependabot
+proposes dependency updates. Install with `uv sync --locked` so packages always match
+the hashes in `uv.lock`.

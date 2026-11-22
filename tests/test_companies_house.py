@@ -2,6 +2,7 @@ import httpx
 import pytest
 import respx
 
+from informant.schema import CompanyProfile
 from informant.sources.companies_house import (
     BASE_URL,
     CompaniesHouseClient,
@@ -9,7 +10,6 @@ from informant.sources.companies_house import (
     fetch_company,
     normalise_company_number,
 )
-from informant.schema import CompanyProfile
 
 PROFILE = {
     "company_name": "EXAMPLE TRADING LIMITED",

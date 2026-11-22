@@ -20,7 +20,7 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import parse_qs, urlparse
 
@@ -28,9 +28,10 @@ import httpx
 
 from ..schema import utcnow
 from .fetchutil import cached_get
+from .httpsafe import USER_AGENT, safe_client
 from .website.extract import core_name, site_host
 
-USER_AGENT = "Mozilla/5.0 (compatible; informant/0.1; personal company research)"
+__all__ = ["USER_AGENT", "fetch_news"]
 BING_URL = "https://www.bing.com/news/search"
 GDELT_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 GUARDIAN_URL = "https://content.guardianapis.com/search"
@@ -113,9 +114,9 @@ def _clean(text: str | None) -> str | None:
     return text or None
 
 
-def _get(http: httpx.Client, cache, url: str, params: dict) -> str:
+def _get(http: httpx.Client, cache, url: str, params: dict, secret: dict | None = None) -> str:
     """GET through the page cache (feeds are reused for a few hours)."""
-    return cached_get(http, cache, url, params, max_age=FEED_MAX_AGE)
+    return cached_get(http, cache, url, params, max_age=FEED_MAX_AGE, secret_params=secret)
 
 
 # --- providers ------------------------------------------------------------------
@@ -166,7 +167,7 @@ def fetch_gdelt(http: httpx.Client, cache, names: list[str], days: int) -> list[
     for a in (json.loads(text).get("articles") or []):
         try:
             published = datetime.strptime(a.get("seendate", ""), "%Y%m%dT%H%M%SZ").replace(
-                tzinfo=timezone.utc)
+                tzinfo=UTC)
         except ValueError:
             published = None
         title = _clean(a.get("title"))
@@ -179,10 +180,11 @@ def fetch_gdelt(http: httpx.Client, cache, names: list[str], days: int) -> list[
 def fetch_guardian(http: httpx.Client, cache, names: list[str], days: int, key: str) -> list[Article]:
     since = (utcnow() - timedelta(days=days)).date().isoformat()
     params = {"q": " OR ".join(f'"{n}"' for n in names), "from-date": since,
-              "order-by": "newest", "page-size": 30, "show-fields": "trailText", "api-key": key}
+              "order-by": "newest", "page-size": 30, "show-fields": "trailText"}
     import json
 
-    data = json.loads(_get(http, cache, GUARDIAN_URL, params))
+    # the key is sent but never written to the cache
+    data = json.loads(_get(http, cache, GUARDIAN_URL, params, secret={"api-key": key}))
     articles = []
     for r in (data.get("response") or {}).get("results") or []:
         try:
@@ -215,7 +217,7 @@ def fetch_news(company_name: str, website: str | None = None, *, days: int = DEF
         return result
 
     own = http is None
-    http = http or httpx.Client(timeout=25, follow_redirects=True, headers={"User-Agent": USER_AGENT})
+    http = http or safe_client(timeout=25)
     guardian_key = os.environ.get("GUARDIAN_API_KEY", "").strip()
     found: list[Article] = []
     try:
@@ -253,7 +255,7 @@ def fetch_news(company_name: str, website: str | None = None, *, days: int = DEF
             continue
         seen.update((key, a.url))
         kept.append(a)
-    kept.sort(key=lambda a: a.published_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    kept.sort(key=lambda a: a.published_at or datetime.min.replace(tzinfo=UTC), reverse=True)
     if off_topic:
         result.notes.append(f"left out {off_topic} result(s) whose headline doesn't name the company")
     if len(kept) > limit:

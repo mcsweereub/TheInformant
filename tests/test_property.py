@@ -4,7 +4,7 @@ import csv
 import io
 import json
 import zipfile
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import respx
 
@@ -52,7 +52,7 @@ def make_zip(path, rows, change_file=False, header=None):
     w.writeheader()
     for r in rows:
         w.writerow(r)
-    buf.write("Row Count:,%d\n" % len(rows))  # the real files end with this footer line
+    buf.write(f"Row Count:,{len(rows)}\n")  # the real files end with this footer line
     with zipfile.ZipFile(path, "w") as z:
         z.writestr(path.stem + ".csv", "﻿" + buf.getvalue())
     return path
@@ -153,7 +153,7 @@ def mock_api(tmp_path, latest_month="2026_11", history_months=("2026_10", "2026_
     change = make_zip(tmp_path / "dl_COU.zip", [
         rec("WYK9", [("ACME LIMITED", "1234567")], added="20-10-2026", change="A")], change_file=True)
     full = make_zip(tmp_path / "dl_FULL.zip", FULL_ROWS)
-    for kind, path in (("COU", change), ("FULL", full)):
+    for kind in ("COU", "FULL"):
         name = f"CCOD_{kind}_{latest_month}.zip"
         respx.get(f"{API}/datasets/ccod/{name}").respond(json={"success": True, "result": {
             "download_url": f"https://bucket.example/ccod/{name}?X-Amz-Signature=abc",
@@ -215,10 +215,10 @@ def test_lookups_check_at_most_once_a_day(tmp_path, monkeypatch):
     store = build_store(tmp_path)  # checked_at = now
     monkeypatch.setenv("LAND_REGISTRY_API_KEY", "k")
     calls = []
-    monkeypatch.setattr(lr, "update", lambda *a, **k: calls.append(k) or {"action": "none"})
+    monkeypatch.setattr(lr.store, "update", lambda *a, **k: calls.append(k) or {"action": "none"})
     assert lr.keep_current(store) is None and calls == []
     with store.session() as conn:
-        store.set_meta(conn, checked_at=(datetime.now(timezone.utc) - timedelta(days=2)).isoformat())
+        store.set_meta(conn, checked_at=(datetime.now(UTC) - timedelta(days=2)).isoformat())
     lr.keep_current(store)
     assert calls == [{"full": False, "allow_full": False, "notify": None}]  # never the full file
 

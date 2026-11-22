@@ -33,3 +33,9 @@ def no_cache_by_default(monkeypatch, tmp_path_factory):
     # builds small ones in temp folders).
     monkeypatch.delenv("LAND_REGISTRY_API_KEY", raising=False)
     monkeypatch.setenv("INFORMANT_DATA_DIR", str(tmp_path_factory.mktemp("informant_data")))
+    # The Claude backend uses httpx2, which respx can't intercept: never let a test reach
+    # the paid API with a real key.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    # Tests mock made-up hosts; the private-address guard (which looks hosts up in DNS)
+    # is tested on its own in test_httpsafe.py.
+    monkeypatch.setenv("INFORMANT_NETGUARD", "off")

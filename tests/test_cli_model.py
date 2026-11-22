@@ -18,7 +18,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     for k in ("INFORMANT_LLM", "INFORMANT_MODEL", "OLLAMA_MODEL", "ANTHROPIC_API_KEY"):
         monkeypatch.delenv(k, raising=False)
-    monkeypatch.setattr(cli, "model_options", lambda: (OPTIONS, True))
+    monkeypatch.setattr(cli.settings, "model_options", lambda: (OPTIONS, True))
     (tmp_path / ".env").write_text("COMPANIES_HOUSE_API_KEY=abc\n")
     yield tmp_path
     for k in ("INFORMANT_LLM", "INFORMANT_MODEL", "OLLAMA_MODEL"):

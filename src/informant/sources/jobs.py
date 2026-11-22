@@ -16,7 +16,7 @@ import json
 import re
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import httpx
 
@@ -61,7 +61,7 @@ def _date(value) -> date | None:
         return None
     try:
         if isinstance(value, (int, float)):  # milliseconds since 1970 (Lever)
-            return datetime.fromtimestamp(value / 1000, tz=timezone.utc).date()
+            return datetime.fromtimestamp(value / 1000, tz=UTC).date()
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).date()
     except (ValueError, OSError):
         return None

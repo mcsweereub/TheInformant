@@ -21,19 +21,19 @@ from ..progress import ProgressFn, emit
 from .backends.base import CompleteFn
 from .budget import fair_shares, remove_repeated_lines
 from .prompts import (
+    MAX_CUSTOMERS,
     MAX_FUNDING,
     MAX_MILESTONES,
     MAX_SHAREHOLDERS,
-    MAX_CUSTOMERS,
     MERGE_SYSTEM_PROMPT,
     STAGE_SYSTEM_PROMPT,
     ChunkFindings,
+    ExtractedCustomer,
     ExtractedFunding,
     ExtractedMilestone,
     ExtractedOffice,
     ExtractedProduct,
     ExtractedShareholder,
-    ExtractedCustomer,
     MergedProfile,
     WebsiteExtraction,
     merge_message,
@@ -99,7 +99,7 @@ def make_chunks(pages: list, stage_chars: int, max_stages: int) -> tuple[list[st
     def pack(budget: int) -> tuple[list[str], list[int]]:
         shares = fair_shares(lengths, budget, cap=budget)
         blocks: list[str] = []
-        for page, text, share in zip(pages, texts, shares):
+        for page, text, share in zip(pages, texts, shares, strict=True):
             if share == 0:
                 continue
             for i, piece in enumerate(split_text(text[:share], body_limit)):
@@ -128,7 +128,7 @@ def make_chunks(pages: list, stage_chars: int, max_stages: int) -> tuple[list[st
         chunks, shares = pack(budget)
     chunks = chunks[:max_stages]
 
-    for page, text, share in zip(pages, texts, shares):
+    for page, text, share in zip(pages, texts, shares, strict=True):
         if 0 < share < len(text):
             notes.append(f"{page.url}: sent first {share:,} of {len(text):,} characters to the LLM")
     return chunks, notes

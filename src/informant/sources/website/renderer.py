@@ -12,6 +12,9 @@ Without it, rendering raises BrowserUnavailable and the crawler carries on as be
 from __future__ import annotations
 
 from typing import Any, Protocol
+from urllib.parse import urlparse
+
+from ..httpsafe import guard_enabled, is_public_host
 
 INSTALL_HINT = "install it with: uv run playwright install chromium"
 # Heavy resources that don't affect page text; blocking them makes rendering much faster.
@@ -27,6 +30,21 @@ class Renderer(Protocol):
         """Load `url`; return (final url, HTTP status, rendered HTML)."""
 
     def close(self) -> None: ...
+
+
+def _route(route: Any) -> None:
+    """Skip heavy resources, and refuse any request (the page itself, its scripts' calls,
+    redirects) to a non-public address such as this machine or the local network."""
+    request = route.request
+    if request.resource_type in BLOCKED_RESOURCES:
+        route.abort()
+        return
+    if guard_enabled():
+        host = urlparse(request.url).hostname
+        if request.url.startswith(("http:", "https:")) and not is_public_host(host):
+            route.abort("addressunreachable")
+            return
+    route.continue_()
 
 
 class PlaywrightRenderer:
@@ -56,12 +74,7 @@ class PlaywrightRenderer:
             viewport={"width": 1366, "height": 900},
             java_script_enabled=True,
         )
-        self._context.route(
-            "**/*",
-            lambda route: route.abort()
-            if route.request.resource_type in BLOCKED_RESOURCES
-            else route.continue_(),
-        )
+        self._context.route("**/*", _route)
 
     def render(self, url: str) -> tuple[str, int | None, str]:
         if self._context is None:

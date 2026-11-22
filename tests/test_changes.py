@@ -2,9 +2,10 @@
 
 import json
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import respx
+from test_cli_json import NUMBER, invoke, mock_companies_house, parse, workdir  # noqa: F401
 
 from informant.changes import compare
 from informant.schema import (
@@ -34,9 +35,8 @@ from informant.storage import (
     load_index,
     save_profile,
 )
-from test_cli_json import NUMBER, invoke, mock_companies_house, parse, workdir  # noqa: F401
 
-T0 = datetime(2026, 10, 1, 9, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
 SRC = [Source(name="companies_house")]
 
 
@@ -162,7 +162,7 @@ def test_since_and_pruning(tmp_path, monkeypatch):
                              identity=Identity(name="ACME LTD", company_number="01234567", status=status)),
                      out_dir=tmp_path)
     assert len(list_snapshots(tmp_path, "01234567")) == 3  # the oldest was pruned
-    since = datetime(2026, 10, 12, tzinfo=timezone.utc)  # the lookup of 11 October
+    since = datetime(2026, 10, 12, tzinfo=UTC)  # the lookup of 11 October
     assert summaries(compare_snapshots(tmp_path, "01234567", since=since)) == [
         "identity|changed|status: liquidation -> dissolved"]
     assert MAX_SNAPSHOTS >= 10  # the real limit

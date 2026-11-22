@@ -4,20 +4,21 @@ signals (DNS, certificate logs, Wayback) and shared analytics IDs. HTTP is mocke
 import httpx
 import pytest
 import respx
+from test_cli_json import NUMBER, mock_companies_house
 
 from informant.errors import ConfigError
 from informant.pipeline import research_company, skipped_sources
 from informant.schema import CompanyProfile, Identity, Website
 from informant.sources.contracts import SEARCH_URL, contracts_material, fetch_contracts, is_supplier
 from informant.sources.domain import CERTSPOTTER_URL, DOH_URL, WAYBACK_CDX, fetch_domain_signals, registrable
-from informant.sources.gleif import API as GLEIF, fetch_lei
+from informant.sources.gleif import API as GLEIF
+from informant.sources.gleif import fetch_lei
 from informant.sources.jobs import Board, fetch_jobs, find_boards, jobs_material
 from informant.sources.website.extract import extract_analytics_ids
 from informant.sources.website.feeds import feeds_material, shopify_catalogue, wordpress_posts
 from informant.sources.website.fetch import Crawler
 from informant.sources.website.parse import Page
 from informant.storage import load_index, save_profile
-from test_cli_json import NUMBER, mock_companies_house
 
 # --- GLEIF --------------------------------------------------------------------------------
 

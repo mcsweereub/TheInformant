@@ -4,11 +4,16 @@ LLM step with its checks. No real downloads, OCR or model calls."""
 from datetime import date
 
 import httpx
-import pytest
 import respx
 
-from informant.llm.accounts import extract_accounts, figure_in_text, parse_date, parse_figure
-from informant.llm.accounts import FactsExtraction, FiguresExtraction
+from informant.llm.accounts import (
+    FactsExtraction,
+    FiguresExtraction,
+    extract_accounts,
+    figure_in_text,
+    parse_date,
+    parse_figure,
+)
 from informant.llm.backends.base import Completion
 from informant.sources.accounts_pdf import (
     PdfPage,

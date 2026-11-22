@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import httpx
 
@@ -51,7 +51,7 @@ def ec_date(value: str | None) -> date | None:
     m = _DATE.match(value or "")
     if not m:
         return None
-    return (datetime.fromtimestamp(int(m.group(1)) / 1000, tz=timezone.utc) + timedelta(hours=12)).date()
+    return (datetime.fromtimestamp(int(m.group(1)) / 1000, tz=UTC) + timedelta(hours=12)).date()
 
 
 def query_for(name: str) -> str:

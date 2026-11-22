@@ -15,8 +15,8 @@ from .backends.claude import extract_with_claude
 from .backends.ollama import extract_with_ollama
 from .budget import build_page_text, fair_shares, remove_repeated_lines
 from .extract import STRATEGIES, choose_strategy, extract_with_llm, make_complete
-from .news import judge_headlines
 from .models import ModelOption, choose_backend, current_model, model_options
+from .news import judge_headlines
 from .prompts import SECTORS, WebsiteExtraction
 from .result import ExtractionResult
 from .staged import extract_staged, make_chunks

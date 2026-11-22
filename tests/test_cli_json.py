@@ -5,13 +5,13 @@ import json
 import httpx
 import pytest
 import respx
+from test_companies_house import FILINGS, OFFICERS, PROFILE, PSCS
 from typer.testing import CliRunner
 
 from informant import cli
-from informant.sources.companies_house import BASE_URL
 from informant.pipeline import research_company
+from informant.sources.companies_house import BASE_URL
 from informant.storage import INDEX_NAME, load_index
-from test_companies_house import FILINGS, OFFICERS, PROFILE, PSCS
 
 NUMBER = "01234567"
 

@@ -20,6 +20,7 @@ from datetime import timedelta
 import httpx
 
 from ..schema import utcnow
+from .fetchutil import api_client
 
 TAVILY_URL = "https://api.tavily.com/search"
 DEFAULT_MAX_SEARCHES = 4
@@ -82,7 +83,7 @@ class WebSearch:
                               f"skipped: {query}")
             return []
         self.used += 1
-        http = self.http or httpx.Client(timeout=30)
+        http = self.http or api_client(timeout=30)
         try:
             resp = http.post(TAVILY_URL, json=body,
                              headers={"Authorization": f"Bearer {self.api_key}"})

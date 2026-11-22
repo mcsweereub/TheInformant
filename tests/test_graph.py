@@ -7,8 +7,8 @@ from typer.testing import CliRunner
 from informant.cli import app
 from informant.graph import build_graph, connections, find_node, neighbours, save_graph
 from informant.schema import (
-    CoOwner,
     CompanyProfile,
+    CoOwner,
     Customer,
     Funding,
     FundingRound,

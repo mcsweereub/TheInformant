@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"  # Mondays: catches newly published vulnerabilities in dependencies
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: lint and tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      # --locked: install exactly what uv.lock pins (hash-checked), never re-resolve
+      - run: uv sync --locked
+      - run: uv run ruff check src tests
+      # no API keys here: tests mock every service (see tests/conftest.py)
+      - run: uv run pytest -q
+
+  audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv export --locked --no-hashes --no-emit-project --format requirements-txt > requirements-audit.txt
+      # PyPA's auditor: checks every pinned package against the Python vulnerability database
+      - run: uvx pip-audit --requirement requirements-audit.txt --no-deps --disable-pip

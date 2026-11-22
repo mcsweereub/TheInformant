@@ -19,8 +19,8 @@ from datetime import date, datetime
 import httpx
 
 from ..schema import PublicContract, PublicContracts, Source
-from .website.extract import legal_key
 from .fetchutil import api_client, cached_post_json
+from .website.extract import legal_key
 
 SEARCH_URL = "https://www.contractsfinder.service.gov.uk/api/rest/2/search_notices/json"
 NOTICE_URL = "https://www.contractsfinder.service.gov.uk/Notice/{id}"

@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 
 from ...errors import ConfigError, NotFoundError, UpstreamError
+from ..httpsafe import USER_AGENT
 
 BASE_URL = "https://api.company-information.service.gov.uk"
 PUBLIC_URL = "https://find-and-update.company-information.service.gov.uk"
@@ -77,7 +78,7 @@ class CompaniesHouseClient:
             base_url=base_url,
             auth=(api_key, ""),
             timeout=timeout,
-            headers={"User-Agent": "informant/0.1 (personal research)"},
+            headers={"User-Agent": USER_AGENT},
         )
 
     def close(self) -> None:

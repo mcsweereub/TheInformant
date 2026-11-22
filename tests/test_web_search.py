@@ -2,7 +2,6 @@
 find a missing website or annual report. A fake Tavily; no real searches."""
 
 import json
-from datetime import date
 
 import httpx
 import pytest

@@ -16,11 +16,21 @@ from dataclasses import dataclass, field
 
 from .cache import AccountsCache, LlmCache, PageCache, cache_enabled
 from .errors import ConfigError, InformantError, NotFoundError
-from .llm.accounts import extract_accounts
-from .sources.accounts_pdf import get_accounts_document
+from .group import group_companies as group_companies  # re-exported: library API
+from .group import overseas_group_companies as overseas_group_companies
 from .llm import judge_headlines, make_complete
+from .llm.accounts import extract_accounts
 from .llm.news import SENTIMENT_SCORES
 from .progress import ProgressFn, emit
+from .public_records import (
+    research_contracts,
+    research_domain,
+    research_donations,
+    research_jobs,
+    research_lei,
+    research_property,
+    research_site_feeds,
+)
 from .schema import (
     CompanyProfile,
     FinancialPeriod,
@@ -31,44 +41,24 @@ from .schema import (
     WebMention,
     WebMentions,
 )
+from .sources.accounts_pdf import get_accounts_document
 from .sources.companies_house import (
     CompaniesHouseClient,
     SearchHit,
     fetch_company,
     normalise_company_number,
 )
-from .sources.companies_house.details import STAGE as REGISTRY_STAGE
 from .sources.companies_house.customers import resolve_customers
+from .sources.companies_house.details import STAGE as REGISTRY_STAGE
 from .sources.companies_house.details import add_registry_details, add_risk_flags
 from .sources.news import DEFAULT_DAYS as DEFAULT_NEWS_DAYS
-from .sources.news import fetch_news
-from .sources.website.research import summary_sentences
-from .sources.wikipedia import fetch_wikipedia
-from .sources.news import mentions, search_names
+from .sources.news import fetch_news, mentions, search_names
 from .sources.web_search import PEOPLE_AND_SOCIAL_DOMAINS, WebSearch
-from .sources.contracts import contracts_material, fetch_contracts
-from .sources.donations import fetch_donations, fetch_group_donations
-from .sources.domain import fetch_domain_signals
-from .sources.gleif import fetch_lei
-from .sources.land_registry import (
-    OVERSEAS,
-    PropertyStore,
-    fetch_group_property,
-    fetch_overseas_group_property,
-    fetch_property,
-    is_overseas_number,
-    is_uk,
-    keep_current,
-    property_material,
-)
-from .sources.jobs import fetch_jobs, find_boards, jobs_material
-from .sources.website.feeds import feeds_material, shopify_catalogue, wordpress_posts
-from .sources.website.parse import CrawlResult
-from .sources import land_registry
-from .sources.website.extract import legal_key, site_host
+from .sources.website.extract import site_host
 from .sources.website.fetch import Crawler
-from .sources.website.parse import Page
-from .sources.website.research import extract_from_material, research_website
+from .sources.website.parse import CrawlResult, Page
+from .sources.website.research import extract_from_material, research_website, summary_sentences
+from .sources.wikipedia import fetch_wikipedia
 
 REGISTRY_DEPTHS = ("full", "basic")
 # Public-data sources that can be skipped (--skip / INFORMANT_SKIP, comma-separated):
@@ -549,220 +539,3 @@ def research_news(profile: CompanyProfile, *, days: int = DEFAULT_NEWS_DAYS, lim
     relevant = sum(1 for n in section.items if n.relevant is not False)
     emit(progress, "news", "done", f"{relevant} article(s)",
          articles=len(section.items), relevant=relevant, providers=found.providers)
-
-
-# --- other public records ----------------------------------------------------------
-
-
-def _known_website(profile: CompanyProfile) -> str | None:
-    """The company's site: the crawled one, else the one Wikidata lists."""
-    return profile.identity.website or next(iter(profile.wikipedia.official_websites), None)
-
-
-def research_lei(profile: CompanyProfile, *, cache=None, progress: ProgressFn | None = None) -> None:
-    """Fill profile.lei from GLEIF (by company number, else exact UK legal name)."""
-    ident = profile.identity
-    emit(progress, "lei", "started", "Looking up the Legal Entity Identifier (GLEIF)")
-    profile.lei = fetch_lei(ident.company_number or "", ident.name, cache=cache).section
-    lei = profile.lei
-    if lei.lei:
-        emit(progress, "lei", "done", lei.lei, lei=lei.lei, subsidiaries=lei.subsidiaries_total)
-    else:
-        emit(progress, "lei", "skipped", lei.notes[-1] if lei.notes else "No LEI")
-
-
-def research_contracts(profile: CompanyProfile, *, cache=None,
-                       progress: ProgressFn | None = None) -> Page | None:
-    """Fill profile.public_contracts; returns the awards as LLM material (or None)."""
-    emit(progress, "contracts", "started", "Searching UK public-sector contracts")
-    profile.public_contracts = fetch_contracts(profile.identity.name, cache=cache)
-    pc = profile.public_contracts
-    emit(progress, "contracts", "done", f"{pc.found} contract award(s)", found=pc.found)
-    return contracts_material(pc)
-
-
-def research_jobs(profile: CompanyProfile, result: CrawlResult | None, *, cache=None,
-                  progress: ProgressFn | None = None) -> list[Page]:
-    """Fill profile.hiring from the job board the site links to (or one found by name);
-    returns the roles as LLM material."""
-    ident = profile.identity
-    emit(progress, "jobs", "started", "Looking for a public job board")
-    pages = result.ok_pages if result is not None else []
-    boards = find_boards([p.html for p in pages], [href for p in pages for href, _ in p.links])
-    names = search_names(ident.name, _known_website(profile))
-    profile.hiring = fetch_jobs(ident.name, boards=boards, names=names, cache=cache)
-    h = profile.hiring
-    if h.provider:
-        emit(progress, "jobs", "done", f"{h.total} open role(s) on {h.provider}",
-             provider=h.provider, roles=h.total)
-    else:
-        emit(progress, "jobs", "skipped", h.notes[-1] if h.notes else "No job board")
-    material = jobs_material(h)
-    return [material] if material is not None else []
-
-
-def research_site_feeds(profile: CompanyProfile, crawler: Crawler, *,
-                        progress: ProgressFn | None = None) -> list[Page]:
-    """WordPress posts and the Shopify catalogue, when the site runs on them."""
-    site = profile.website
-    if not site.url:
-        return []
-    wp, shop = "WordPress" in profile.tech_stack, "Shopify" in profile.tech_stack
-    if not (wp or shop):
-        emit(progress, "feeds", "skipped", "Not a WordPress or Shopify site")
-        return []
-    emit(progress, "feeds", "started", "Reading the site's own feeds")
-    if wp:
-        site.posts = wordpress_posts(crawler, site.url)
-    if shop:
-        site.shop = shopify_catalogue(crawler, site.url)
-        if site.shop is None:
-            site.notes.append("Shopify product feed not available")
-    emit(progress, "feeds", "done", f"{len(site.posts)} post(s)"
-         + (f", {site.shop.products_listed} products" if site.shop else ""),
-         posts=len(site.posts), products=site.shop.products_listed if site.shop else 0)
-    return feeds_material(site.posts, site.shop, site.url)
-
-
-def research_domain(profile: CompanyProfile, *, cache=None,
-                    progress: ProgressFn | None = None) -> None:
-    """Fill profile.domain: DNS, certificate logs and the Wayback Machine."""
-    website = _known_website(profile)
-    if not website:
-        emit(progress, "domain", "skipped", "No website known")
-        return
-    emit(progress, "domain", "started", "Reading DNS, certificate logs and the web archive")
-    profile.domain = fetch_domain_signals(website, incorporated_on=profile.identity.incorporated_on,
-                                          cache=cache)
-    d = profile.domain
-    emit(progress, "domain", "done", d.email_provider or d.name, email_provider=d.email_provider,
-         subdomains=len(d.subdomains))
-
-
-def research_donations(profile: CompanyProfile, *, cache=None,
-                       progress: ProgressFn | None = None) -> None:
-    """Fill profile.political_donations from the Electoral Commission's register, searching
-    the current and previous names and matching on the company number; then the same for
-    the other UK companies in its group (parents and LEI subsidiaries)."""
-    ident = profile.identity
-    emit(progress, "donations", "started", "Searching the register of political donations")
-    names = [ident.name] + [p.name for p in ident.previous_names]
-    earlier = profile.political_donations  # the accounts statement may already be there
-    pd = fetch_donations(ident.company_number or "", names, cache=cache)
-    pd.accounts_statement = earlier.accounts_statement
-    pd.accounts_statement_url = earlier.accounts_statement_url
-    profile.political_donations = pd
-
-    group = group_companies(profile)
-    if group:
-        emit(progress, "donations", "progress", f"Checking {len(group)} other group companies")
-        pd.group, notes = fetch_group_donations(group, cache=cache)
-        pd.group_searched = [f"{name} ({number}, {relation})" for number, name, relation in group]
-        pd.notes.extend(notes)
-    in_group = sum(g.found for g in pd.group)
-    emit(progress, "donations", "done", f"{pd.found} donation(s)"
-         + (f", {in_group} by group companies" if in_group else ""),
-         found=pd.found, total_value=pd.total_value, group_found=in_group)
-
-
-def research_property(profile: CompanyProfile, *, store: PropertyStore | None = None,
-                      overseas_store: PropertyStore | None = None,
-                      progress: ProgressFn | None = None):
-    """Fill profile.property from the local copies of HM Land Registry's UK and overseas
-    companies datasets (applying newer monthly change files first, at most once a day),
-    with totals for the rest of the group: UK group companies by number, overseas ones by
-    exact name and country. Returns LLM material (or None)."""
-    store = store or PropertyStore()
-    overseas_store = overseas_store or PropertyStore(dataset=OVERSEAS)
-    ident = profile.identity
-    # an overseas company registered here (FC/OE number) is in the overseas dataset
-    is_overseas = is_overseas_number(ident.company_number)
-    own_store = overseas_store if is_overseas else store
-    if not store.exists() and not overseas_store.exists():
-        emit(progress, "property", "skipped", "No local Land Registry data "
-                                               "(run `informant property --update`)")
-        profile.property = fetch_property(None, store=store)  # carries the how-to note
-        return None
-    emit(progress, "property", "started", "Reading Land Registry ownership data")
-    notify = lambda m: emit(progress, "property", "progress", m)  # noqa: E731
-    notes = [n for s in (store, overseas_store) if s.exists() for n in [keep_current(s, notify)] if n]
-    names = [ident.name] + [p.name for p in ident.previous_names]
-    holdings = fetch_property(ident.company_number, names, store=own_store)
-    holdings.notes.extend(notes)
-    group = group_companies(profile) if store.exists() else []
-    if group:
-        holdings.group = fetch_group_property(group, store=store)
-        holdings.group_searched = [f"{name} ({number}, {relation})" for number, name, relation in group]
-    abroad = overseas_group_companies(profile) if overseas_store.exists() else []
-    if abroad:
-        found, found_notes = fetch_overseas_group_property(abroad, overseas_store)
-        holdings.group.extend(found)
-        holdings.notes.extend(found_notes)
-        holdings.group_searched += [f"{name} ({country or 'overseas'}, {relation})"
-                                    for _, name, country, relation in abroad]
-    if overseas_store.exists() and (abroad or is_overseas):
-        meta = overseas_store.meta()
-        holdings.overseas_dataset = meta.get("dataset") or None
-        holdings.overseas_data_as_of = land_registry.date_or_none(meta.get("published"))
-        if is_overseas and store.exists():
-            uk_meta = store.meta()
-            holdings.dataset = uk_meta.get("dataset") or None
-            holdings.data_as_of = land_registry.date_or_none(uk_meta.get("published"))
-        if not any(s.url == land_registry.dataset_page(OVERSEAS) for s in holdings.sources):
-            holdings.sources.append(land_registry.source_for(overseas_store, meta))
-    profile.property = holdings
-    in_group = sum(g.titles for g in holdings.group)
-    emit(progress, "property", "done", f"{holdings.found} title(s)"
-         + (f", {in_group} owned by group companies" if in_group else ""),
-         found=holdings.found, group_titles=in_group)
-    return property_material(holdings)
-
-
-def group_companies(profile: CompanyProfile) -> list[tuple[str, str, str]]:
-    """Other UK-registered companies in the group as (number, name, relation): parents from
-    the PSC chain and the LEI record, then subsidiaries that have LEIs."""
-    own = (profile.identity.company_number or "").lstrip("0")
-    out: dict[str, tuple[str, str, str]] = {}
-
-    def add(number: str | None, name: str, relation: str) -> None:
-        key = (number or "").upper().lstrip("0")
-        if key and key != own and key not in out:
-            out[key] = (number, name, relation)
-
-    for parent in profile.ownership.parents:
-        add(parent.company_number, parent.name, "parent")
-    lei = profile.lei
-    for parent in (lei.direct_parent, lei.ultimate_parent):
-        if parent is not None:
-            add(parent.company_number, parent.name, "parent")
-    for child in lei.subsidiaries:
-        add(child.company_number, child.name, "subsidiary")
-    return list(out.values())
-
-
-MAX_OVERSEAS_GROUP = 12
-
-
-def overseas_group_companies(profile: CompanyProfile) -> list[tuple[str | None, str, str | None, str]]:
-    """Group companies incorporated outside the UK, as (FC/OE number or None, name, country,
-    relation): corporate owners in the PSC chain registered abroad, and LEI parents and
-    subsidiaries whose legal address is outside the UK. Entries of unknown country are
-    left out (they can't be told apart from UK companies)."""
-    own = legal_key(profile.identity.name)
-    out: dict[str, tuple[str | None, str, str | None, str]] = {}
-
-    def add(number: str | None, name: str, country: str | None, relation: str) -> None:
-        key = legal_key(name)
-        overseas = is_overseas_number(number) or (not number and country and not is_uk(country))
-        if key and key != own and overseas and key not in out:
-            out[key] = (number if is_overseas_number(number) else None, name, country, relation)
-
-    for parent in profile.ownership.parents:
-        add(parent.company_number, parent.name, parent.country_registered, "parent")
-    lei = profile.lei
-    for parent in (lei.direct_parent, lei.ultimate_parent):
-        if parent is not None:
-            add(parent.company_number, parent.name, parent.country, "parent")
-    for child in lei.subsidiaries:
-        add(child.company_number, child.name, child.country, "subsidiary")
-    return list(out.values())[:MAX_OVERSEAS_GROUP]

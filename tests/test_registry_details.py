@@ -18,9 +18,9 @@ from informant.schema import (
     Charges,
     CompanyProfile,
     Compliance,
+    Filings,
     FinancialPeriod,
     Financials,
-    Filings,
     Identity,
     Officer,
     People,
@@ -502,7 +502,7 @@ def test_one_failing_step_does_not_stop_the_rest(full_registry):
 
 @respx.mock
 def test_basic_depth_skips_extra_calls_and_bad_value_is_rejected(full_registry):
-    fake = mock_core()
+    mock_core()
     result = CliRunner().invoke(cli.app, ["lookup", N, "--no-web", "--json", "--registry", "basic"])
     p = json.loads(result.stdout)["profile"]
     assert p["financials"]["periods"] == [] and p["ownership"]["parents"] == []

@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from itertools import pairwise
 
 from ..sources.website.extract import core_name  # imports only parsing helpers: no cycle
-
 from .prompts import (
     MERGE_SYSTEM_PROMPT,
     SECTORS,
@@ -161,7 +161,7 @@ def frequent_terms(text: str, limit: int, exclude: set[str],
             if acronym not in _COMMON_ACRONYMS:
                 counts[acronym.lower()] = counts.get(acronym.lower(), 0) + 1
         words = _ALPHA.findall(line.lower())
-        for a, b in zip(words, words[1:]):
+        for a, b in pairwise(words):
             if len(a) >= 4 and len(b) >= 4 and a not in _FILLER and b not in _FILLER and a != b:
                 counts[f"{a} {b}"] = counts.get(f"{a} {b}", 0) + 1
     # The company's own name is frequent on its site but says nothing about what it does.

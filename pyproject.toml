@@ -30,4 +30,18 @@ build-backend = "uv_build"
 dev = [
     "pytest>=9.2.0",
     "respx>=0.23.1",
+    "ruff>=0.17.6",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+# pyflakes, pycodestyle errors/warnings, bugbear, import order, pyupgrade
+select = ["E", "F", "W", "B", "I", "UP"]
+ignore = [
+    "E501",  # long lines: readability is judged by hand
+    "E741",  # short names like `l` in small comprehensions
+    "B008",  # typer declares options as function-call defaults
 ]

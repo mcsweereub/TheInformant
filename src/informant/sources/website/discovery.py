@@ -14,8 +14,8 @@ from urllib.parse import urlparse
 
 import httpx
 
-from .fetch import Crawler
 from .extract import core_name, verify_ownership
+from .fetch import Crawler
 
 WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
 
@@ -44,8 +44,8 @@ def wikidata_website(company_number: str, client: httpx.Client | None = None) ->
     variants = {company_number, company_number.lstrip("0")}
     values = " ".join(f'"{v}"' for v in variants)
     query = (
-        "SELECT ?site WHERE { VALUES ?n { %s } ?item wdt:P2622 ?n . ?item wdt:P856 ?site . } LIMIT 5"
-        % values
+        f"SELECT ?site WHERE {{ VALUES ?n {{ {values} }} ?item wdt:P2622 ?n . "
+        "?item wdt:P856 ?site . } LIMIT 5"
     )
     http = client or httpx.Client(timeout=15, headers={"User-Agent": ua})
     try:

@@ -58,7 +58,7 @@ def build_page_text(pages: list[Page], total_limit: int = TOTAL_CHAR_LIMIT) -> t
 
     shares = fair_shares([len(t) if t.strip() else 0 for t in texts], total_limit)
     parts: list[str] = []
-    for page, text, share in zip(pages, texts, shares):
+    for page, text, share in zip(pages, texts, shares, strict=True):
         if share == 0:
             continue  # nothing on this page that wasn't already sent
         if len(text) > share:

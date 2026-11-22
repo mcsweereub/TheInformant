@@ -13,7 +13,7 @@ program). Rules:
 from __future__ import annotations
 
 import datetime as dt
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, PrivateAttr
@@ -38,7 +38,7 @@ SourceName = Literal[
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(microsecond=0)
+    return datetime.now(dt.UTC).replace(microsecond=0)
 
 
 class Source(BaseModel):

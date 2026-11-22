@@ -6,9 +6,8 @@ import anthropic
 import httpx
 import respx
 
-from informant.sources.website.fetch import Crawler
-from informant.sources.website.pages import choose_pages
-from informant.sources.website.parse import parse_page
+from informant.llm import SECTORS, extract_with_llm
+from informant.schema import CompanyProfile, Identity, Location
 from informant.sources.website.discovery import candidate_domains, discover_website
 from informant.sources.website.extract import (
     core_name,
@@ -17,8 +16,9 @@ from informant.sources.website.extract import (
     extract_social_links,
     verify_ownership,
 )
-from informant.llm import SECTORS, extract_with_llm
-from informant.schema import CompanyProfile, Identity, Location
+from informant.sources.website.fetch import Crawler
+from informant.sources.website.pages import choose_pages
+from informant.sources.website.parse import parse_page
 from informant.sources.website.research import research_website
 
 HOME = """<html><head><title>Acme Widgets | Industrial widgets</title>
